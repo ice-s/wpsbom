@@ -22,19 +22,28 @@ var ErrNoRootFS = errors.New("container file system not readable in place")
 
 // ScanContainer scans a running container where it is: its root file system as the storage
 // driver mounted it on the host (overlay2 MergedDir), plus the bind mounts and volumes over its
-// application directories, read at their source. Nothing is copied, so it takes seconds; the
+// application directories, read at their source. Without a MergedDir (the containerd image
+// store, other drivers) it reads /proc/PID/root, where the mounts are already in place. Nothing is copied, so it takes seconds; the
 // layer each package came from is not known this way (Scan of the exported image has it).
 func ScanContainer(ctx context.Context, c *docker.Client, id string, opts Options) (*inventory.Inventory, error) {
 	ct, err := c.InspectContainer(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	merged := ct.GraphDriver.Data["MergedDir"]
+	merged, viaProc := ct.GraphDriver.Data["MergedDir"], false
+	if merged != "" {
+		if _, err := os.Stat(merged); err != nil {
+			merged = ""
+		}
+	}
+	if merged == "" && ct.State.Pid > 0 {
+		merged, viaProc = fmt.Sprintf("/proc/%d/root", ct.State.Pid), true
+		if _, err := os.Stat(merged); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrNoRootFS, err)
+		}
+	}
 	if merged == "" {
 		return nil, fmt.Errorf("%w (storage driver %q)", ErrNoRootFS, ct.GraphDriver.Name)
-	}
-	if _, err := os.Stat(merged); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrNoRootFS, err)
 	}
 	fsys, err := rootfs.New(merged)
 	if err != nil {
@@ -43,8 +52,12 @@ func ScanContainer(ctx context.Context, c *docker.Client, id string, opts Option
 
 	dirs := AppDirs(ct.Config.WorkingDir, opts.Paths)
 	// Mounts hide what the image has at their destination; their content is on the host.
+	// Through /proc/PID/root the container's own view already has them.
 	var mounts []docker.Mount
 	for _, m := range ct.Mounts {
+		if viaProc {
+			break
+		}
 		if m.Source != "" && m.Destination != "" && (m.Type == "bind" || m.Type == "volume") && relevant(m.Destination, dirs) {
 			mounts = append(mounts, m)
 		}

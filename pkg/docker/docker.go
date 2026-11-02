@@ -108,9 +108,12 @@ type Mount struct {
 
 // ContainerInspect is the part of /containers/{id}/json wpsbom uses.
 type ContainerInspect struct {
-	ID     string `json:"Id"`
-	Name   string `json:"Name"`
-	Image  string `json:"Image"` // image ID
+	ID    string `json:"Id"`
+	Name  string `json:"Name"`
+	Image string `json:"Image"` // image ID
+	State struct {
+		Pid int `json:"Pid"`
+	} `json:"State"`
 	Config struct {
 		Image      string `json:"Image"`
 		WorkingDir string `json:"WorkingDir"`
