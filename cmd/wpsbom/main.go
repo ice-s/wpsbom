@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 
 	"github.com/ice-s/wpsbom/pkg/format"
 	"github.com/ice-s/wpsbom/pkg/rootfs"
@@ -21,6 +22,11 @@ const usage = `wpsbom: SBOM of an operating system's installed packages (dpkg, a
 Usage:
   wpsbom scan [flags] [ROOT]   scan ROOT (default "/": the running system)
   wpsbom version
+
+Examples:
+  wpsbom scan / -o table
+  wpsbom scan / > sbom.cdx.json
+  wpsbom scan / -o spdx-json=sbom.spdx.json -o csv=packages.csv -o table
 
 Scan flags:
 `
@@ -56,8 +62,27 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	return fmt.Errorf("unknown command %q (try \"wpsbom help\")", args[0])
 }
 
+// output is one "-o FORMAT[=FILE]"; an empty file means stdout.
+type output struct {
+	format string
+	file   string
+}
+
+type outputs []output
+
+func (o *outputs) String() string { return "" }
+
+func (o *outputs) Set(v string) error {
+	name, file, _ := strings.Cut(v, "=")
+	if format.Encoders[name] == nil {
+		return fmt.Errorf("unknown format %q (one of %s)", name, strings.Join(format.Names(), ", "))
+	}
+	*o = append(*o, output{name, file})
+	return nil
+}
+
 type scanOpts struct {
-	output       string
+	outputs      outputs
 	file         string
 	reproducible bool
 	hostname     bool
@@ -65,8 +90,8 @@ type scanOpts struct {
 
 func scanFlags(o *scanOpts) *flag.FlagSet {
 	f := flag.NewFlagSet("scan", flag.ContinueOnError)
-	f.StringVar(&o.output, "o", "cyclonedx-json", "output format: cyclonedx-json, table")
-	f.StringVar(&o.file, "file", "", "write to this file instead of stdout")
+	f.Var(&o.outputs, "o", "output `FORMAT[=FILE]`, repeatable; formats: "+strings.Join(format.Names(), ", ")+" (default cyclonedx-json)")
+	f.StringVar(&o.file, "file", "", "write the output to this file instead of stdout (single -o without =FILE)")
 	f.BoolVar(&o.reproducible, "reproducible", false, "no serial number or timestamp: same system, same bytes")
 	f.BoolVar(&o.hostname, "hostname", false, "record the hostname as is (default: a hash of it)")
 	return f
@@ -89,8 +114,21 @@ func scan(ctx context.Context, args []string, stdout io.Writer) error {
 			return fmt.Errorf("unexpected argument %q", f.Arg(0))
 		}
 	}
-	if o.output != "cyclonedx-json" && o.output != "table" {
-		return fmt.Errorf("unknown output format %q", o.output)
+	outs := o.outputs
+	if len(outs) == 0 {
+		outs = outputs{{format: "cyclonedx-json"}}
+	}
+	toStdout := 0
+	for i := range outs {
+		if outs[i].file == "" && o.file != "" && len(outs) == 1 {
+			outs[i].file = o.file
+		}
+		if outs[i].file == "" {
+			toStdout++
+		}
+	}
+	if toStdout > 1 {
+		return errors.New("several outputs to stdout: give each -o a file (-o FORMAT=FILE)")
 	}
 
 	fsys, err := rootfs.New(root)
@@ -103,25 +141,27 @@ func scan(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 
-	w := stdout
-	if o.file != "" {
-		out, err := os.Create(o.file)
-		if err != nil {
+	opts := format.Options{ToolVersion: wpsbom.Version, Reproducible: o.reproducible}
+	for _, out := range outs {
+		if err := write(out, stdout, func(w io.Writer) error { return format.Encoders[out.format](w, inv, opts) }); err != nil {
 			return err
 		}
-		defer out.Close()
-		w = out
 	}
-	if o.output == "table" {
-		err = format.Table(w, inv)
-	} else {
-		err = format.CycloneDX(w, inv, format.Options{ToolVersion: wpsbom.Version, Reproducible: o.reproducible})
+	return nil
+}
+
+// write runs encode on stdout or on out.file.
+func write(out output, stdout io.Writer, encode func(io.Writer) error) error {
+	if out.file == "" {
+		return encode(stdout)
 	}
+	f, err := os.Create(out.file)
 	if err != nil {
 		return err
 	}
-	if c, ok := w.(io.Closer); ok && w != stdout {
-		return c.Close()
+	if err := encode(f); err != nil {
+		f.Close()
+		return fmt.Errorf("%s: %w", out.file, err)
 	}
-	return nil
+	return f.Close()
 }

@@ -31,23 +31,36 @@ func sample() *inventory.Inventory {
 	return inv
 }
 
-func TestCycloneDXGolden(t *testing.T) {
-	var buf bytes.Buffer
-	if err := CycloneDX(&buf, sample(), Options{ToolVersion: "test", Reproducible: true}); err != nil {
-		t.Fatal(err)
+// Every format against its golden file; run with -update to accept a change.
+func TestGolden(t *testing.T) {
+	goldens := map[string]string{
+		"cyclonedx-json": "alpine.cdx.json",
+		"cyclonedx-xml":  "alpine.cdx.xml",
+		"spdx-json":      "alpine.spdx.json",
+		"csv":            "alpine.csv",
+		"table":          "alpine.txt",
 	}
-	const golden = "testdata/alpine.cdx.json"
-	if *update {
-		if err := os.WriteFile(golden, buf.Bytes(), 0o644); err != nil {
+	if len(goldens) != len(Encoders) {
+		t.Fatalf("golden files for %d formats, %d formats exist", len(goldens), len(Encoders))
+	}
+	for name, file := range goldens {
+		var buf bytes.Buffer
+		if err := Encoders[name](&buf, sample(), Options{ToolVersion: "test", Reproducible: true}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		golden := "testdata/" + file
+		if *update {
+			if err := os.WriteFile(golden, buf.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		want, err := os.ReadFile(golden)
+		if err != nil {
 			t.Fatal(err)
 		}
-	}
-	want, err := os.ReadFile(golden)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(buf.Bytes(), want) {
-		t.Errorf("output differs from %s (run with -update to accept):\n%s", golden, buf.String())
+		if !bytes.Equal(buf.Bytes(), want) {
+			t.Errorf("%s differs from %s (run with -update to accept):\n%s", name, golden, buf.String())
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ libssl3     3.0.16-1~deb12u1   amd64  openssl  deb
 openssl     3.0.16-1~deb12u1   amd64  openssl  deb
 …
 $ wpsbom scan / > sbom.cdx.json        # CycloneDX 1.6 JSON
+$ wpsbom scan / -o spdx-json=sbom.spdx.json -o csv=packages.csv
 ```
 
 ## Why
@@ -38,8 +39,21 @@ pkg:apk/alpine/libcrypto3@3.3.2-r0?arch=x86_64&distro=alpine-3.20.3&upstream=ope
 | dpkg (`/var/lib/dpkg/status`, distroless `status.d/`) | Debian, Ubuntu and derivatives |
 | apk (`/lib/apk/db/installed`) | Alpine, Wolfi |
 
-Planned: rpm (RHEL, Rocky, Alma, Fedora, SUSE, Amazon Linux), SPDX output, scanning container
-images directly, and `push`/`agent` commands to send the SBOM to a server on a schedule.
+Planned: rpm (RHEL, Rocky, Alma, Fedora, SUSE, Amazon Linux), scanning container images
+directly, and `push`/`agent` commands to send the SBOM to a server on a schedule.
+
+## Output formats
+
+| `-o` | Content | Read by |
+|---|---|---|
+| `cyclonedx-json` (default) | CycloneDX 1.6 JSON | Dependency-Track, Grype, Trivy, most SBOM tools |
+| `cyclonedx-xml` | CycloneDX 1.6 XML | tools that only take XML |
+| `spdx-json` | SPDX 2.3 JSON (ISO/IEC 5962) | compliance tooling, Trivy, GitHub |
+| `csv` | one package per row, with PURL | spreadsheets |
+| `table` | aligned columns | people |
+
+Both SBOM formats pass the official validators (`cyclonedx-cli validate`, `pyspdxtools`), and
+Trivy finds the same vulnerabilities from either.
 
 ## Install
 
@@ -68,8 +82,9 @@ sha256sum --ignore-missing -c checksums.txt
 
 ```
 wpsbom scan [flags] [ROOT]
-  -o cyclonedx-json|table   output format (default cyclonedx-json)
-  -file PATH                write to a file
+  -o FORMAT[=FILE]          output format, repeatable; without =FILE it goes to stdout
+                            (default cyclonedx-json)
+  -file PATH                write the single output to a file
   -reproducible             no serial number or timestamp: same system, same bytes
   -hostname                 record the hostname as is (default: a hash of it)
 ```

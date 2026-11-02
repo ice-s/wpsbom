@@ -31,9 +31,22 @@ const (
 	propDistro        = "wpsbom:os:distro"
 )
 
-// CycloneDX writes a CycloneDX 1.6 JSON SBOM. metadata.component describes the operating
-// system; each installed package is a library component identified by its PURL.
+// CycloneDX writes a CycloneDX 1.6 JSON SBOM.
 func CycloneDX(w io.Writer, inv *inventory.Inventory, opts Options) error {
+	// Unescaped HTML keeps "&" in PURLs readable.
+	return cdx.NewBOMEncoder(w, cdx.BOMFileFormatJSON).SetPretty(true).SetEscapeHTML(false).
+		EncodeVersion(cycloneDXBOM(inv, opts), cdx.SpecVersion1_6)
+}
+
+// CycloneDXXML writes a CycloneDX 1.6 XML SBOM.
+func CycloneDXXML(w io.Writer, inv *inventory.Inventory, opts Options) error {
+	return cdx.NewBOMEncoder(w, cdx.BOMFileFormatXML).SetPretty(true).
+		EncodeVersion(cycloneDXBOM(inv, opts), cdx.SpecVersion1_6)
+}
+
+// cycloneDXBOM builds the BOM: metadata.component describes the operating system; each
+// installed package is a library component identified by its PURL.
+func cycloneDXBOM(inv *inventory.Inventory, opts Options) *cdx.BOM {
 	bom := cdx.NewBOM()
 	bom.Metadata = &cdx.Metadata{
 		Tools: &cdx.ToolsChoice{Components: &[]cdx.Component{{
@@ -72,9 +85,7 @@ func CycloneDX(w io.Writer, inv *inventory.Inventory, opts Options) error {
 		comps = append(comps, c)
 	}
 	bom.Components = &comps
-
-	// Unescaped HTML keeps "&" in PURLs readable.
-	return cdx.NewBOMEncoder(w, cdx.BOMFileFormatJSON).SetPretty(true).SetEscapeHTML(false).EncodeVersion(bom, cdx.SpecVersion1_6)
+	return bom
 }
 
 func osComponent(inv *inventory.Inventory) *cdx.Component {

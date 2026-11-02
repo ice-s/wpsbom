@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bom xmlns="http://cyclonedx.org/schema/bom/1.6" version="1">
+  <metadata>
+    <tools>
+      <components>
+        <component type="application">
+          <name>wpsbom</name>
+          <version>test</version>
+        </component>
+      </components>
+    </tools>
+    <component bom-ref="os:alpine-3.20.3" type="operating-system">
+      <name>alpine</name>
+      <version>3.20.3</version>
+      <description>Alpine Linux v3.20</description>
+      <properties>
+        <property name="wpsbom:os:distro">alpine-3.20.3</property>
+        <property name="wpsbom:os:kernel">6.6.0</property>
+      </properties>
+    </component>
+  </metadata>
+  <components>
+    <component bom-ref="pkg:apk/alpine/libcrypto3@3.3.2-r0?arch=x86_64&amp;distro=alpine-3.20.3&amp;upstream=openssl" type="library">
+      <name>libcrypto3</name>
+      <version>3.3.2-r0</version>
+      <licenses>
+        <license>
+          <name>Apache-2.0</name>
+        </license>
+      </licenses>
+      <purl>pkg:apk/alpine/libcrypto3@3.3.2-r0?arch=x86_64&amp;distro=alpine-3.20.3&amp;upstream=openssl</purl>
+      <properties>
+        <property name="wpsbom:package:type">apk</property>
+        <property name="wpsbom:package:source-name">openssl</property>
+        <property name="wpsbom:package:source-version">3.3.2-r0</property>
+      </properties>
+    </component>
+    <component bom-ref="pkg:apk/alpine/musl@1.2.5-r0?arch=x86_64&amp;distro=alpine-3.20.3&amp;upstream=musl" type="library">
+      <name>musl</name>
+      <version>1.2.5-r0</version>
+      <purl>pkg:apk/alpine/musl@1.2.5-r0?arch=x86_64&amp;distro=alpine-3.20.3&amp;upstream=musl</purl>
+      <properties>
+        <property name="wpsbom:package:type">apk</property>
+        <property name="wpsbom:package:source-name">musl</property>
+        <property name="wpsbom:package:source-version">1.2.5-r0</property>
+      </properties>
+    </component>
+  </components>
+</bom>
