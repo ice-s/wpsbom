@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  # Inside each image, wpsbom's package list must equal the package manager's own.
+  distros:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - debian:11
+          - debian:12
+          - ubuntu:20.04
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - alpine:3.18
+          - alpine:3.19
+          - alpine:3.20
+          - nginx:1.27
+          - python:3.12-slim
+          - node:22-alpine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: CGO_ENABLED=0 go build -o dist/wpsbom ./cmd/wpsbom
+      - name: compare as an unprivileged user
+        run: |
+          docker run --rm --user 65534:65534 \
+            -v "$PWD/dist/wpsbom:/usr/local/bin/wpsbom:ro" \
+            -v "$PWD/scripts/compare-in-image.sh:/compare.sh:ro" \
+            ${{ matrix.image }} sh /compare.sh

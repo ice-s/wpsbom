@@ -1,0 +1,85 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "metadata": {
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "wpsbom",
+          "version": "test"
+        }
+      ]
+    },
+    "component": {
+      "bom-ref": "os:alpine-3.20.3",
+      "type": "operating-system",
+      "name": "alpine",
+      "version": "3.20.3",
+      "description": "Alpine Linux v3.20",
+      "properties": [
+        {
+          "name": "wpsbom:os:distro",
+          "value": "alpine-3.20.3"
+        },
+        {
+          "name": "wpsbom:os:kernel",
+          "value": "6.6.0"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "pkg:apk/alpine/libcrypto3@3.3.2-r0?arch=x86_64&distro=alpine-3.20.3&upstream=openssl",
+      "type": "library",
+      "name": "libcrypto3",
+      "version": "3.3.2-r0",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache-2.0"
+          }
+        }
+      ],
+      "purl": "pkg:apk/alpine/libcrypto3@3.3.2-r0?arch=x86_64&distro=alpine-3.20.3&upstream=openssl",
+      "properties": [
+        {
+          "name": "wpsbom:package:type",
+          "value": "apk"
+        },
+        {
+          "name": "wpsbom:package:source-name",
+          "value": "openssl"
+        },
+        {
+          "name": "wpsbom:package:source-version",
+          "value": "3.3.2-r0"
+        }
+      ]
+    },
+    {
+      "bom-ref": "pkg:apk/alpine/musl@1.2.5-r0?arch=x86_64&distro=alpine-3.20.3&upstream=musl",
+      "type": "library",
+      "name": "musl",
+      "version": "1.2.5-r0",
+      "purl": "pkg:apk/alpine/musl@1.2.5-r0?arch=x86_64&distro=alpine-3.20.3&upstream=musl",
+      "properties": [
+        {
+          "name": "wpsbom:package:type",
+          "value": "apk"
+        },
+        {
+          "name": "wpsbom:package:source-name",
+          "value": "musl"
+        },
+        {
+          "name": "wpsbom:package:source-version",
+          "value": "1.2.5-r0"
+        }
+      ]
+    }
+  ]
+}
