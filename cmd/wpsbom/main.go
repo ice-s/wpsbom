@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -74,9 +75,9 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	case "scan":
 		return scanCmd(ctx, args[1:], stdout)
 	case "push":
-		return pushCmd(ctx, args[1:])
+		return pushCmd(ctx, args[1:], stdout)
 	case "k8s":
-		return k8sCmd(ctx, args[1:])
+		return k8sCmd(ctx, args[1:], stdout)
 	case "upgrade":
 		return upgradeCmd(ctx, args[1:])
 	case "version", "--version", "-v":
@@ -124,6 +125,9 @@ type opts struct {
 	baseImage  string
 	imagePaths list
 	docker     bool
+	layers     bool
+	noOS       bool
+	quiet      bool
 	// scan output
 	outputs      outputs
 	file         string
@@ -135,6 +139,7 @@ type opts struct {
 	token   string
 	url     string
 	failOn  string
+	json    bool
 	// k8s
 	cluster    string
 	namespace  string
@@ -153,7 +158,11 @@ func newFlags(cmd string, o *opts) *flag.FlagSet {
 			"docker-archive:FILE, oci-dir:DIR, or REF: the local daemon, else the registry); repeatable")
 		f.StringVar(&o.baseImage, "base-image", "", "the image's base image `REF` (FROM …), to tell its layers apart exactly")
 		f.Var(&o.imagePaths, "image-path", "extra application `DIR` inside images (besides WORKDIR, /app, /var/www, /srv, …); repeatable")
-		f.BoolVar(&o.docker, "docker", false, "also scan the image of every running Docker container (needs the docker socket)")
+		f.BoolVar(&o.docker, "docker", false, "also scan every running Docker container in place: its application libraries\n"+
+			"(and OS packages unless --no-os), bind mounts included; one SBOM per image (needs root)")
+		f.BoolVar(&o.layers, "layers", false, "with --docker: export each image instead, to record the layer every package came from (slower)")
+		f.BoolVar(&o.noOS, "no-os", false, "leave out operating system packages: application libraries only (host, images, containers)")
+		f.BoolVar(&o.quiet, "quiet", false, "no progress messages on stderr")
 		f.BoolVar(&o.hostname, "hostname", false, "record the hostname as is (default: a hash of it)")
 	}
 	if cmd == "scan" {
@@ -167,7 +176,11 @@ func newFlags(cmd string, o *opts) *flag.FlagSet {
 		f.StringVar(&o.url, "url", envOr("WPSBOM_URL", push.DefaultURL), "Watchpost API base `URL` (default $WPSBOM_URL)")
 		f.StringVar(&o.failOn, "fail-on", "", "exit with status 3 when an upload has `kev` or `critical` vulnerabilities (for CI)")
 	}
+	if cmd == "push" || cmd == "k8s" {
+		f.BoolVar(&o.json, "json", false, "print the upload results as JSON on stdout (projects, URLs, vulnerability counts)")
+	}
 	if cmd == "push" {
+		f.StringVar(&o.outDir, "out-dir", "", "also write each SBOM sent (CycloneDX JSON) into `DIR`")
 		f.StringVar(&o.project, "project", "", "project `NAME` for this host (or for the single --image; default: the image repository)")
 	}
 	if cmd == "k8s" {
@@ -229,30 +242,44 @@ func collect(ctx context.Context, root string, o *opts) ([]sbom, error) {
 		}
 		base = cfg.RootFS.DiffIDs
 	}
-	imgOpts := image.Options{Paths: o.imagePaths, BaseDiffIDs: base}
+	imgOpts := image.Options{Paths: o.imagePaths, BaseDiffIDs: base, NoOS: o.noOS}
+	progress := func(format string, a ...any) {
+		if !o.quiet {
+			fmt.Fprintf(os.Stderr, "wpsbom: "+format+"\n", a...)
+		}
+	}
+	summary := func(inv *inventory.Inventory) string {
+		return fmt.Sprintf("%d packages, %d applications", len(inv.Packages), len(inv.Apps))
+	}
 
 	var out []sbom
 	seen := map[string]bool{}
+	keep := func(inv *inventory.Inventory) {
+		if !seen[inv.Image.Digest] {
+			seen[inv.Image.Digest] = true
+			out = append(out, sbom{inv: inv, kind: "image", name: push.ProjectName(firstNonEmpty(inv.Image.Repo, inv.Image.Ref))})
+		}
+	}
 	addImage := func(src *image.Source) (*inventory.Inventory, error) {
 		defer src.Close()
 		inv, err := image.Scan(ctx, src, imgOpts)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", src.Meta.Ref, err)
 		}
-		if !seen[inv.Image.Digest] {
-			seen[inv.Image.Digest] = true
-			out = append(out, sbom{inv: inv, kind: "image", name: push.ProjectName(firstNonEmpty(inv.Image.Repo, inv.Image.Ref))})
-		}
+		keep(inv)
 		return inv, nil
 	}
 	for _, ref := range o.images {
+		progress("image %s: exporting and reading its layers…", ref)
 		src, err := image.Open(ctx, ref)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := addImage(src); err != nil {
+		inv, err := addImage(src)
+		if err != nil {
 			return nil, err
 		}
+		progress("image %s: %s", ref, summary(inv))
 	}
 	if len(o.images) > 0 && !o.docker && len(o.paths) == 0 {
 		return out, nil
@@ -263,10 +290,12 @@ func collect(ctx context.Context, root string, o *opts) ([]sbom, error) {
 		return nil, err
 	}
 	live := fsys.Root() == filepath.Clean("/")
-	host, err := wpsbom.Scan(ctx, fsys, wpsbom.Options{Live: live, RevealHostname: o.hostname, Paths: o.paths})
+	progress("host %s…", fsys.Root())
+	host, err := wpsbom.Scan(ctx, fsys, wpsbom.Options{Live: live, RevealHostname: o.hostname, Paths: o.paths, NoOS: o.noOS})
 	if err != nil {
 		return nil, err
 	}
+	progress("host %s: %s", fsys.Root(), summary(host))
 	if o.docker {
 		c, err := docker.New()
 		if err != nil {
@@ -276,22 +305,40 @@ func collect(ctx context.Context, root string, o *opts) ([]sbom, error) {
 		if err != nil {
 			return nil, err
 		}
+		progress("%d running containers", len(containers))
 		digests := map[string]string{} // image ID → digest
-		for _, ct := range containers {
+		for i, ct := range containers {
 			if _, ok := digests[ct.ImageID]; !ok {
-				src, err := image.FromDaemon(ctx, c, ct.ImageID)
-				if err != nil {
-					return nil, err
+				label := fmt.Sprintf("[%d/%d] container %s (%s)", i+1, len(containers), ct.Name(), ct.Image)
+				var inv *inventory.Inventory
+				if !o.layers {
+					// In place: the running file system and its mounts, nothing copied.
+					inv, err = image.ScanContainer(ctx, c, ct.ID, imgOpts)
+					if err != nil && !errors.Is(err, image.ErrNoRootFS) {
+						return nil, fmt.Errorf("%s: %w", ct.Name(), err)
+					}
+					if err != nil {
+						progress("%s: %v; exporting the image instead", label, err)
+					}
 				}
-				// The reference the container was started from names the image better than its ID.
-				src.Meta.Ref = ct.Image
-				if src.Meta.Repo == "" {
-					src.Meta.Repo = repoOfRef(ct.Image)
+				if inv == nil {
+					progress("%s: exporting the image and reading its layers…", label)
+					src, err := image.FromDaemon(ctx, c, ct.ImageID)
+					if err != nil {
+						return nil, err
+					}
+					// The reference the container was started from names the image better than its ID.
+					src.Meta.Ref = ct.Image
+					if src.Meta.Repo == "" {
+						src.Meta.Repo = repoOfRef(ct.Image)
+					}
+					if inv, err = addImage(src); err != nil {
+						return nil, err
+					}
+				} else {
+					keep(inv)
 				}
-				inv, err := addImage(src)
-				if err != nil {
-					return nil, err
-				}
+				progress("%s: %s", label, summary(inv))
 				digests[ct.ImageID] = inv.Image.Digest
 			}
 			host.Containers = append(host.Containers, inventory.Container{ID: shortID(ct.ID), Name: ct.Name(), Image: ct.Image, Digest: digests[ct.ImageID]})
@@ -430,7 +477,7 @@ func checkFailOn(v string) error {
 	return nil
 }
 
-func pushCmd(ctx context.Context, args []string) error {
+func pushCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	var o opts
 	f := newFlags("push", &o)
 	root, err := parse(f, args)
@@ -448,7 +495,13 @@ func pushCmd(ctx context.Context, args []string) error {
 	if hasHost && o.project == "" {
 		return errors.New("--project NAME is required for a host scan")
 	}
+	if o.outDir != "" {
+		if err := os.MkdirAll(o.outDir, 0o755); err != nil {
+			return err
+		}
+	}
 	c := newClient(&o)
+	var results []uploaded
 	var policy error
 	// Images first, so the host's containers point at SBOMs that exist.
 	for i := len(sboms) - 1; i >= 0; i-- {
@@ -457,22 +510,59 @@ func pushCmd(ctx context.Context, args []string) error {
 		if s.kind == "host" || (o.project != "" && len(sboms) == 1) {
 			name = o.project
 		}
-		if err := upload(ctx, c, name, s, o.failOn); err != nil {
+		res, err := upload(ctx, c, name, s, o.failOn, o.outDir)
+		if res != nil {
+			results = append(results, *res)
+		}
+		if err != nil {
 			if !errors.Is(err, push.ErrPolicy) {
 				return err
 			}
 			policy = err
 		}
 	}
+	if o.json {
+		if err := printJSON(stdout, map[string]any{"uploads": results}); err != nil {
+			return err
+		}
+	}
 	return policy
 }
 
-func upload(ctx context.Context, c *push.Client, project string, s sbom, failOn string) error {
+// uploaded is one upload in the --json output.
+type uploaded struct {
+	Project    string      `json:"project"`
+	ID         string      `json:"id"`
+	URL        string      `json:"url"`
+	Kind       string      `json:"kind"`
+	Components int         `json:"components"`
+	Counts     push.Counts `json:"counts"`
+	Failed     bool        `json:"failed"`
+	File       string      `json:"file,omitempty"`
+}
+
+func printJSON(w io.Writer, v any) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
+
+// upload sends one SBOM (and with outDir also writes it there), printing a summary on stderr.
+func upload(ctx context.Context, c *push.Client, project string, s sbom, failOn, outDir string) (*uploaded, error) {
 	var buf bytes.Buffer
 	if err := format.CycloneDX(&buf, s.inv, format.Options{ToolVersion: wpsbom.Version}); err != nil {
-		return err
+		return nil, err
+	}
+	file := ""
+	if outDir != "" {
+		file = filepath.Join(outDir, s.kind+"-"+unsafeFile.ReplaceAllString(project, "_")+".cdx.json")
+		if err := os.WriteFile(file, buf.Bytes(), 0o644); err != nil {
+			return nil, err
+		}
 	}
 	res, err := c.Upload(ctx, project, s.kind, failOn, buf.Bytes())
+	var out *uploaded
 	if res != nil {
 		n := res.Counts
 		fmt.Fprintf(os.Stderr, "%s (%s): %d components, %d vulnerabilities (KEV %d, critical %d, high %d)",
@@ -481,14 +571,15 @@ func upload(ctx context.Context, c *push.Client, project string, s sbom, failOn 
 			fmt.Fprintf(os.Stderr, " %s", res.Project.URL)
 		}
 		fmt.Fprintln(os.Stderr)
+		out = &uploaded{Project: res.Project.Name, ID: res.Project.ID, URL: res.Project.URL, Kind: s.kind, Components: res.Components, Counts: n, Failed: res.Failed, File: file}
 	}
 	if err != nil && !errors.Is(err, push.ErrPolicy) {
-		return fmt.Errorf("%s: %w", project, err)
+		return out, fmt.Errorf("%s: %w", project, err)
 	}
-	return err
+	return out, err
 }
 
-func k8sCmd(ctx context.Context, args []string) error {
+func k8sCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	var o opts
 	f := newFlags("k8s", &o)
 	if err := f.Parse(args); err != nil {
@@ -512,6 +603,7 @@ func k8sCmd(ctx context.Context, args []string) error {
 		return err
 	}
 	c := newClient(&o)
+	var results []uploaded
 	var policy error
 	if o.scanImages {
 		done := map[string]bool{}
@@ -533,7 +625,11 @@ func k8sCmd(ctx context.Context, args []string) error {
 				fmt.Fprintln(os.Stderr, "wpsbom: skip", ref+":", err)
 				continue
 			}
-			if err := upload(ctx, c, push.ProjectName(w.Repo), sbom{inv: inv, kind: "image"}, o.failOn); err != nil {
+			res, err := upload(ctx, c, push.ProjectName(w.Repo), sbom{inv: inv, kind: "image"}, o.failOn, "")
+			if res != nil {
+				results = append(results, *res)
+			}
+			if err != nil {
 				if !errors.Is(err, push.ErrPolicy) {
 					return err
 				}
@@ -546,6 +642,11 @@ func k8sCmd(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "%s: %d workload containers\n", o.cluster, n)
+	if o.json {
+		if err := printJSON(stdout, map[string]any{"cluster": o.cluster, "workloads": n, "uploads": results}); err != nil {
+			return err
+		}
+	}
 	return policy
 }
 

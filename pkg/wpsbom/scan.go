@@ -32,8 +32,10 @@ type Options struct {
 	// RevealHostname reports the hostname as is instead of a hash of it.
 	RevealHostname bool
 	// Paths are source directories (absolute inside the root) searched for applications and
-	// their lock files, or Go binaries. Nothing outside them is searched.
+	// their lock files, installed Python packages, or Go binaries. Nothing outside them is searched.
 	Paths []string
+	// NoOS leaves out the operating system's packages: applications only.
+	NoOS bool
 }
 
 // Collector lists one package manager's installed packages; nil without its database.
@@ -59,6 +61,9 @@ func Scan(ctx context.Context, fsys fs.FS, opts Options) (*inventory.Inventory, 
 	}
 	inv := &inventory.Inventory{Distro: distro}
 	for _, c := range Collectors {
+		if opts.NoOS {
+			break
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

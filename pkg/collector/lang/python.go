@@ -229,3 +229,101 @@ func pep621Deps(fsys fs.FS, dir string) map[string]bool {
 	}
 	return out
 }
+
+// isSitePackages tells whether a directory is where pip installs packages.
+func isSitePackages(name string) bool { return name == "site-packages" || name == "dist-packages" }
+
+// parseSitePackages reads the installed distributions of a site-packages directory (pip, venvs,
+// the image's global Python): the Name/Version/License headers of every *.dist-info/METADATA
+// and *.egg-info/PKG-INFO. Which ones the application asked for directly is not recorded there.
+func parseSitePackages(fsys fs.FS, dir string) *result {
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return nil
+	}
+	r := &result{name: sitePackagesName(dir)}
+	for _, e := range entries {
+		n := e.Name()
+		var meta string
+		switch {
+		case strings.HasSuffix(n, ".dist-info"):
+			meta = "METADATA"
+		case strings.HasSuffix(n, ".egg-info") && e.IsDir():
+			meta = "PKG-INFO"
+		default:
+			continue
+		}
+		b, err := fs.ReadFile(fsys, path.Join(dir, n, meta))
+		if err != nil {
+			continue
+		}
+		var p inventory.Package
+		sc := bufio.NewScanner(bytes.NewReader(b))
+		sc.Buffer(make([]byte, 64*1024), 1024*1024)
+		for sc.Scan() {
+			line := sc.Text()
+			if line == "" {
+				break // the headers end at the first blank line; the description follows
+			}
+			k, v, ok := strings.Cut(line, ":")
+			if !ok {
+				continue
+			}
+			v = strings.TrimSpace(v)
+			switch strings.ToLower(k) {
+			case "name":
+				p.Name = v
+			case "version":
+				p.Version = v
+			case "license-expression":
+				p.Licenses = []string{v}
+			case "license":
+				if p.Licenses == nil && v != "" && v != "UNKNOWN" && len(v) < 100 {
+					p.Licenses = []string{v}
+				}
+			}
+		}
+		if p.Name != "" && p.Version != "" {
+			r.pkgs = append(r.pkgs, p)
+		}
+	}
+	if len(r.pkgs) == 0 {
+		return nil
+	}
+	return r
+}
+
+// sitePackagesName names the environment: the project of a virtualenv ("/srv/api/.venv/lib/…"
+// → "api"), or the interpreter for a global one ("python3.12").
+func sitePackagesName(dir string) string {
+	i := strings.Index(dir, "/lib/python")
+	if i < 0 {
+		return path.Base(path.Dir(dir))
+	}
+	py := strings.SplitN(dir[i+len("/lib/"):], "/", 2)[0]
+	prefix := dir[:i]
+	switch path.Base(prefix) {
+	case "usr", "local", ".", "":
+		return py
+	case "venv", ".venv", "env", ".env", "virtualenv":
+		return path.Base(path.Dir(prefix))
+	}
+	return path.Base(prefix)
+}
+
+// sitePackagesDir is the application directory of a site-packages: the project holding a
+// virtualenv ("srv/api/.venv/lib/python3.12/site-packages" → "srv/api"), else the directory itself.
+func sitePackagesDir(dir string) string {
+	i := strings.Index(dir, "/lib/python")
+	if i <= 0 {
+		return dir
+	}
+	prefix := dir[:i]
+	switch path.Base(prefix) {
+	case "venv", ".venv", "env", ".env", "virtualenv":
+		return path.Dir(prefix)
+	case "usr", "local":
+		return dir
+	}
+	return prefix
+}

@@ -63,7 +63,7 @@ func TestDescribeLayers(t *testing.T) {
 }
 
 func TestWanted(t *testing.T) {
-	dirs := []string{"/var/www", "/usr/local/bin"}
+	dirs := []string{"/var/www", "/usr/local/bin", "/usr/local/lib"}
 	cases := map[string]bool{
 		"var/lib/dpkg/status":                           true,
 		"var/lib/dpkg/status.d/base":                    true,
@@ -75,13 +75,15 @@ func TestWanted(t *testing.T) {
 		"var/www/api/requirements-dev.txt":              true,
 		"var/www/shop/README.md":                        false,
 		"etc/passwd":                                    false,
+		"usr/local/lib/python3.12/site-packages/requests-2.31.0.dist-info/METADATA": true,
+		"usr/local/lib/python3.12/site-packages/requests/api.py":                    false,
 	}
 	for name, want := range cases {
 		if got := wanted(name, 0o644, 100, dirs); got != want {
 			t.Errorf("%s: got %v", name, got)
 		}
 	}
-	if !wanted("usr/local/bin/server", 0o755, 1<<20, dirs) || wanted("usr/local/bin/huge", 0o755, maxExtract+1, dirs) || wanted("usr/bin/ls", 0o755, 100, dirs) {
+	if !wanted("usr/local/bin/server", 0o755, 1<<20, dirs) || wanted("usr/local/bin/huge", 0o755, maxExtract+1, dirs) || wanted("usr/bin/ls", 0o755, 100, dirs) || wanted("usr/local/lib/libssl.so.3", 0o755, 100, dirs) {
 		t.Error("executables: only in application directories and below the size limit")
 	}
 }

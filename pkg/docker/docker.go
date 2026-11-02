@@ -1,5 +1,5 @@
 // Package docker talks to the Docker Engine API over its unix socket, read-only: list running
-// containers, inspect an image, export an image ("docker save"). It needs access to the socket
+// containers, inspect a container or an image, export an image ("docker save"). It needs access to the socket
 // (root or the docker group) and nothing else; no Docker client library is linked in.
 package docker
 
@@ -97,6 +97,39 @@ func (c *Client) Containers(ctx context.Context) ([]Container, error) {
 	var out []Container
 	err := c.getJSON(ctx, "/containers/json", &out)
 	return out, err
+}
+
+// Mount is a volume or bind mount of a container.
+type Mount struct {
+	Type        string `json:"Type"` // bind, volume, tmpfs
+	Source      string `json:"Source"`
+	Destination string `json:"Destination"`
+}
+
+// ContainerInspect is the part of /containers/{id}/json wpsbom uses.
+type ContainerInspect struct {
+	ID     string `json:"Id"`
+	Name   string `json:"Name"`
+	Image  string `json:"Image"` // image ID
+	Config struct {
+		Image      string `json:"Image"`
+		WorkingDir string `json:"WorkingDir"`
+	} `json:"Config"`
+	// GraphDriver.Data.MergedDir is the container's root file system on the host (overlay2).
+	GraphDriver struct {
+		Name string            `json:"Name"`
+		Data map[string]string `json:"Data"`
+	} `json:"GraphDriver"`
+	Mounts []Mount `json:"Mounts"`
+}
+
+// InspectContainer looks a container up by ID or name.
+func (c *Client) InspectContainer(ctx context.Context, id string) (*ContainerInspect, error) {
+	var out ContainerInspect
+	if err := c.getJSON(ctx, "/containers/"+url.PathEscape(id)+"/json", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // ImageInspect is the part of /images/{name}/json wpsbom uses.

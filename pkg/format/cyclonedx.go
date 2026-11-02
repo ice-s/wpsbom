@@ -163,9 +163,12 @@ func cycloneDXBOM(inv *inventory.Inventory, opts Options) *cdx.BOM {
 		deps := make([]cdx.Dependency, 0, len(inv.Apps)+1)
 		apps := make([]string, 0, len(inv.Apps))
 		for _, a := range inv.Apps {
-			refs := direct[a.Manifest]
-			deps = append(deps, cdx.Dependency{Ref: AppRef(a), Dependencies: &refs})
 			apps = append(apps, AppRef(a))
+			// Without known direct dependencies (installed Python packages, binaries) the graph says
+			// nothing rather than "none of them is direct".
+			if refs := direct[a.Manifest]; len(refs) > 0 {
+				deps = append(deps, cdx.Dependency{Ref: AppRef(a), Dependencies: &refs})
+			}
 		}
 		if ref := bom.Metadata.Component.BOMRef; ref != "" {
 			deps = append([]cdx.Dependency{{Ref: ref, Dependencies: &apps}}, deps...)

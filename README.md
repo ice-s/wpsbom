@@ -103,7 +103,10 @@ wpsbom scan [flags] [ROOT]
   -image REF                scan a container image instead of ROOT, repeatable
   -base-image REF           the image's base image, to tell its layers apart exactly
   -image-path DIR           extra application directory inside images, repeatable
-  -docker                   also scan the image of every running container
+  -docker                   also scan every running container (in place, needs root)
+  -layers                   with --docker: export images to record layers (slower)
+  -no-os                    application libraries only, no OS packages
+  -quiet                    no progress messages
   -reproducible             no serial number or timestamp: same system, same bytes
   -hostname                 record the hostname as is (default: a hash of it)
 ```
@@ -133,7 +136,7 @@ wpsbom scan / --path /var/www/shop --path /srv/api -o table
 |---|---|---|
 | PHP | `composer.lock` (only what `vendor/composer/installed.json` has, when present), or `installed.json` alone | `composer.json` |
 | Node.js | `package-lock.json` / `npm-shrinkwrap.json` (v1–v3), `yarn.lock` (classic and Berry) | `package.json` |
-| Python | `poetry.lock`, `Pipfile.lock`, pinned `requirements*.txt` | `pyproject.toml`, `Pipfile` |
+| Python | `poetry.lock`, `Pipfile.lock`, pinned `requirements*.txt`; installed packages in `site-packages` / `dist-packages` (virtualenvs, the image's Python) | `pyproject.toml`, `Pipfile` |
 | Go | `go.mod`; executables with Go build info (their modules and Go version) | `// indirect` |
 | Ruby | `Gemfile.lock` | its `DEPENDENCIES` |
 
@@ -148,7 +151,8 @@ wpsbom scan --image nginx:1.27 -o table           # local daemon, else the regis
 wpsbom scan --image registry:ghcr.io/acme/shop@sha256:…
 wpsbom scan --image docker-archive:shop.tar       # docker save output; oci-dir:DIR for OCI layouts
 wpsbom scan --image ghcr.io/acme/shop:1.4 --base-image php:8.3-fpm
-wpsbom scan / --docker --out-dir sboms/           # the host + the image of every running container
+wpsbom scan / --docker --out-dir sboms/           # the host + every running container
+wpsbom scan / --docker --no-os --out-dir sboms/   # application libraries only
 ```
 
 Layers are replayed one by one (only package databases, lock files and executables in
@@ -157,8 +161,18 @@ whether that layer belongs to the base image: exactly with `--base-image`, other
 the history timestamps. Application directories in images: `WORKDIR`, `/app`, `/srv`, `/var/www`,
 `/usr/src/app`, `/opt/app`, `/code`, `/workspace`, `/home/app`, `/usr/local/bin`, plus `--image-path`.
 
-`--docker` needs the Docker socket; the host SBOM lists the running containers and each image
-SBOM is written separately.
+`--docker` reads every running container where it is, in seconds: its file system as Docker
+mounted it on the host (overlay2), plus bind mounts and volumes over its application
+directories, read at their source (so `./src:/var/www/html` is found). It needs root. One SBOM
+per image; the host SBOM lists the containers. `--layers` exports each image instead (minutes,
+temporary space in `/tmp`) to record the layer every package came from; other storage drivers
+fall back to that automatically.
+
+`--no-os` leaves out operating system packages everywhere: application libraries only.
+Progress goes to stderr (`--quiet` to silence it).
+
+`push --json` prints the upload results (projects, URLs, vulnerability counts) as JSON on
+stdout; `push --out-dir DIR` also keeps the SBOMs it sent.
 
 ### Sending to Watchpost: `push`, `k8s`
 

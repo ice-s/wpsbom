@@ -46,6 +46,7 @@ func TestCollect(t *testing.T) {
 		"npm shop-assets /srv/shop /srv/shop/package-lock.json",
 		"npm y1 /srv/yarn1 /srv/yarn1/yarn.lock",
 		"pypi acme-api /srv/api /srv/api/poetry.lock",
+		"pypi api /srv/api /srv/api/.venv/lib/python3.12/site-packages",
 		"pypi legacy /srv/legacy /srv/legacy/requirements.txt",
 	}
 	if strings.Join(gotApps, "\n") != strings.Join(wantApps, "\n") {
@@ -75,6 +76,7 @@ func TestCollect(t *testing.T) {
 		"pkg:npm/lodash@4.17.20 /srv/yarn1/yarn.lock direct",
 		"pkg:npm/lodash@4.17.21 /srv/berry/yarn.lock direct",
 		"pkg:npm/vite@5.0.10 /srv/shop/package-lock.json direct dev",
+		"pkg:pypi/django@4.2.7 /srv/api/.venv/lib/python3.12/site-packages",
 		"pkg:pypi/django@4.2.7 /srv/api/poetry.lock direct",
 		"pkg:pypi/flask@2.0.1 /srv/legacy/requirements.txt direct",
 		"pkg:pypi/pytest@6.2.0 /srv/legacy/requirements.txt direct dev",
@@ -118,5 +120,25 @@ func TestGoBinary(t *testing.T) {
 	}
 	if len(pkgs) == 0 || pkgs[0].Name != "stdlib" || strings.HasPrefix(pkgs[0].Version, "go") {
 		t.Errorf("want stdlib first, version without \"go\": %+v", pkgs)
+	}
+}
+
+func TestSitePackages(t *testing.T) {
+	fsys, _ := rootfs.New("testdata/pyimg")
+	apps, pkgs, err := Collect(fsys, []string{"/usr/local/lib"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 1 || apps[0].Name != "python3.11" || apps[0].Dir != "/usr/local/lib/python3.11/site-packages" {
+		t.Fatalf("apps: %+v", apps)
+	}
+	var got []string
+	for _, p := range pkgs {
+		got = append(got, pkgLine(p)+" "+strings.Join(p.Licenses, ","))
+	}
+	want := "pkg:pypi/old-pkg@1.0 /usr/local/lib/python3.11/site-packages \n" +
+		"pkg:pypi/requests@2.25.0 /usr/local/lib/python3.11/site-packages Apache-2.0"
+	if strings.Join(got, "\n") != want {
+		t.Errorf("got:\n%s", strings.Join(got, "\n"))
 	}
 }

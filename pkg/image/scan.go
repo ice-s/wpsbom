@@ -21,12 +21,18 @@ import (
 
 // DefaultAppDirs are where images usually keep their application, searched for lock files and
 // Go binaries in addition to the image's WORKDIR and any Options.Paths.
-var DefaultAppDirs = []string{"/app", "/srv", "/var/www", "/usr/src/app", "/opt/app", "/code", "/workspace", "/home/app", "/usr/local/bin"}
+var DefaultAppDirs = []string{"/app", "/srv", "/var/www", "/usr/src/app", "/opt/app", "/code", "/workspace", "/home/app", "/usr/local/bin", "/usr/local/lib", "/opt/venv"}
+
+// libDirs hold shared libraries (executable bits set) and Python installs: no binaries are
+// extracted from them, only Python package metadata.
+var libDirs = map[string]bool{"/usr/local/lib": true}
 
 // Options control an image scan.
 type Options struct {
 	// Paths are extra application directories inside the image.
 	Paths []string
+	// NoOS leaves out the image's OS packages.
+	NoOS bool
 	// BaseDiffIDs are the layers of the image's base image (FROM …): layers of this image that
 	// start with the same list are marked Base. Without them the history timestamps decide.
 	BaseDiffIDs []v1.Hash
@@ -85,7 +91,7 @@ func Scan(ctx context.Context, src *Source, opts Options) (*inventory.Inventory,
 		if !touched {
 			continue
 		}
-		inv, err := scanDir(ctx, tmp, dirs)
+		inv, err := scanDir(ctx, tmp, dirs, opts.NoOS)
 		if err != nil {
 			return nil, fmt.Errorf("layer %d: %w", i+1, err)
 		}
@@ -111,7 +117,7 @@ func key(p inventory.Package) string {
 }
 
 // scanDir scans the replayed root; application directories that do not exist (yet) are left out.
-func scanDir(ctx context.Context, dir string, appDirs []string) (*inventory.Inventory, error) {
+func scanDir(ctx context.Context, dir string, appDirs []string, noOS bool) (*inventory.Inventory, error) {
 	fsys, err := rootfs.New(dir)
 	if err != nil {
 		return nil, err
@@ -122,7 +128,7 @@ func scanDir(ctx context.Context, dir string, appDirs []string) (*inventory.Inve
 			paths = append(paths, d)
 		}
 	}
-	inv, err := wpsbom.Scan(ctx, fsys, wpsbom.Options{Paths: paths})
+	inv, err := wpsbom.Scan(ctx, fsys, wpsbom.Options{Paths: paths, NoOS: noOS})
 	if errors.Is(err, wpsbom.ErrNothingFound) {
 		return &inventory.Inventory{}, nil
 	}
@@ -131,8 +137,14 @@ func scanDir(ctx context.Context, dir string, appDirs []string) (*inventory.Inve
 
 // appDirs: the defaults, WORKDIR and the extra paths, cleaned and without duplicates.
 func appDirs(cfg *v1.ConfigFile, extra []string) []string {
+	return AppDirs(cfg.Config.WorkingDir, extra)
+}
+
+// AppDirs are the application directories searched in an image or container: the defaults,
+// its working directory and the extra paths, cleaned and without duplicates.
+func AppDirs(workingDir string, extra []string) []string {
 	all := append([]string{}, DefaultAppDirs...)
-	if wd := cfg.Config.WorkingDir; wd != "" && path.Clean(wd) != "/" {
+	if wd := workingDir; wd != "" && path.Clean(wd) != "/" {
 		all = append(all, wd)
 	}
 	all = append(all, extra...)
@@ -172,7 +184,11 @@ func wanted(name string, mode int64, size int64, dirs []string) bool {
 		if langFiles[base] || strings.HasPrefix(base, "requirements") && strings.HasSuffix(base, ".txt") {
 			return true
 		}
-		return mode&0o111 != 0 && size <= maxExtract
+		// Installed Python distributions: their metadata file is enough.
+		if parent := path.Base(path.Dir(name)); (base == "METADATA" && strings.HasSuffix(parent, ".dist-info")) || (base == "PKG-INFO" && strings.HasSuffix(parent, ".egg-info")) {
+			return true
+		}
+		return !libDirs[d] && mode&0o111 != 0 && size <= maxExtract
 	}
 	return false
 }

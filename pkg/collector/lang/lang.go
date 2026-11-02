@@ -23,9 +23,12 @@ const MaxDepth = 6
 // Directories never descended into: installed dependencies (their own lock files are not the
 // application's), VCS data, caches.
 var skipDirs = map[string]bool{
-	"node_modules": true, "vendor": true, "bower_components": true, "site-packages": true,
-	"__pycache__": true, "venv": true, "env": true, "storage": true, "cache": true, "tmp": true,
+	"node_modules": true, "vendor": true, "bower_components": true,
+	"__pycache__": true, "storage": true, "cache": true, "tmp": true,
 }
+
+// Hidden directories that are searched anyway: virtualenvs.
+var hiddenDirs = map[string]bool{".venv": true}
 
 // parser reads one kind of lock file in dir (slash path inside the root, no leading slash).
 // It returns nil when that file is not there.
@@ -77,6 +80,18 @@ func Collect(fsys fs.FS, dirs []string) ([]inventory.App, []inventory.Package, e
 			continue
 		}
 		err = walk(fsys, root, 0, func(dir string) error {
+			// pip's install directory: the installed distributions, not lock files.
+			if isSitePackages(path.Base(dir)) {
+				rel := dir
+				if !seen[rel] {
+					seen[rel] = true
+					if r := parseSitePackages(fsys, dir); r != nil {
+						app, ps := finish(inventory.TypePyPI, sitePackagesDir(dir), rel, r)
+						apps, pkgs = append(apps, app), append(pkgs, ps...)
+					}
+				}
+				return nil
+			}
 			for _, p := range parsers {
 				for _, file := range p.files {
 					rel := path.Join(dir, file)
@@ -119,6 +134,9 @@ func walk(fsys fs.FS, dir string, depth int, onDir func(string) error, onExec fu
 	if err := onDir(dir); err != nil {
 		return err
 	}
+	if isSitePackages(path.Base(dir)) {
+		return nil
+	}
 	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
 		// Unreadable subdirectories (permissions) are skipped, not fatal.
@@ -132,7 +150,7 @@ func walk(fsys fs.FS, dir string, depth int, onDir func(string) error, onExec fu
 		child := path.Join(dir, name)
 		switch {
 		case e.IsDir():
-			if depth < MaxDepth && !skipDirs[name] && !strings.HasPrefix(name, ".") {
+			if depth < MaxDepth && !skipDirs[name] && (!strings.HasPrefix(name, ".") || hiddenDirs[name]) {
 				if err := walk(fsys, child, depth+1, onDir, onExec); err != nil {
 					return err
 				}
@@ -167,7 +185,9 @@ func finish(typ, dir, manifest string, r *result) (inventory.App, []inventory.Pa
 		seen[p.PURL] = true
 		out = append(out, p)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name || out[i].Name == out[j].Name && out[i].Version < out[j].Version })
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name || out[i].Name == out[j].Name && out[i].Version < out[j].Version
+	})
 	return app, out
 }
 
