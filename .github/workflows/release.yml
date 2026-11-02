@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write # create the GitHub release
   id-token: write # keyless cosign signing
+  packages: write # push ghcr.io/ice-s/wpsbom
 
 jobs:
   release:
@@ -27,3 +28,29 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The container image the Kubernetes CronJob runs (deploy/kubernetes.yaml), for amd64 and arm64.
+  image:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ github.ref_name }}
+          tags: |
+            ghcr.io/ice-s/wpsbom:${{ github.ref_name }}
+            ghcr.io/ice-s/wpsbom:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/ice-s/wpsbom
+            org.opencontainers.image.licenses=Apache-2.0
