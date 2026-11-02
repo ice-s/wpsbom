@@ -19,6 +19,18 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+  install-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: .
+      - name: install the latest release
+        run: |
+          WPSBOM_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          "$RUNNER_TEMP/bin/wpsbom" scan / -o table | head -5
+
   # Inside each image, wpsbom's package list must equal the package manager's own.
   distros:
     runs-on: ubuntu-latest

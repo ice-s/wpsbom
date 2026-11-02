@@ -5,7 +5,7 @@ set -eu
 cd "$(dirname "$0")/.."
 arch=${GOARCH:-$(docker version -f '{{.Server.Arch}}')}
 mkdir -p dist
-GOOS=linux GOARCH=$arch scripts/go.sh build -o dist/wpsbom-linux-$arch ./cmd/wpsbom
+GOOS=linux GOARCH="$arch" scripts/go.sh build -o "dist/wpsbom-linux-$arch" ./cmd/wpsbom
 
 images=${*:-debian:11 debian:12 ubuntu:20.04 ubuntu:22.04 ubuntu:24.04 alpine:3.18 alpine:3.19 alpine:3.20}
 failed=""

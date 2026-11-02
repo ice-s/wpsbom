@@ -43,8 +43,17 @@ images directly, and `push`/`agent` commands to send the SBOM to a server on a s
 
 ## Install
 
-Download a release from https://github.com/ice-s/wpsbom/releases (Linux and macOS, amd64 and
-arm64), or with Go: `go install github.com/ice-s/wpsbom/cmd/wpsbom@latest`.
+```sh
+curl -fsSL https://raw.githubusercontent.com/ice-s/wpsbom/main/install.sh | sh
+```
+
+The script picks the build for your OS and architecture (Linux and macOS, amd64 and arm64),
+checks its SHA-256 against the release, and installs it to `/usr/local/bin` (`~/.local/bin`
+without root). A specific version: `… | sh -s -- v1.0.0`. With wget: `wget -qO- … | sh`.
+
+The binary is static: nothing else (Go included) is needed on the machine. You can also download
+it from https://github.com/ice-s/wpsbom/releases, or build it with
+`go install github.com/ice-s/wpsbom/cmd/wpsbom@latest`.
 
 Releases are signed with Sigstore. To check one:
 
