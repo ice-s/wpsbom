@@ -69,6 +69,18 @@ The binary is static: nothing else (Go included) is needed on the machine. You c
 it from https://github.com/ice-s/wpsbom/releases, or build it with
 `go install github.com/ice-s/wpsbom/cmd/wpsbom@latest`.
 
+To upgrade later (from v1.2.0 on; older versions: run the install line again):
+
+```sh
+wpsbom upgrade            # latest release; use sudo if it lives in /usr/local/bin
+wpsbom upgrade --check    # only tell whether a newer release exists
+wpsbom upgrade v1.2.0     # a given version, older ones included
+```
+
+The upgrade checks the download's SHA-256 against the release and runs the new binary before
+swapping it in, so a failed upgrade leaves the old one in place. wpsbom only goes online when
+you run `upgrade`; it never checks for updates by itself.
+
 Releases are signed with Sigstore. To check one:
 
 ```sh

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ice-s/wpsbom/internal/upgrade"
 	"github.com/ice-s/wpsbom/pkg/format"
 	"github.com/ice-s/wpsbom/pkg/rootfs"
 	"github.com/ice-s/wpsbom/pkg/wpsbom"
@@ -21,6 +22,8 @@ const usage = `wpsbom: SBOM of an operating system's installed packages (dpkg, a
 
 Usage:
   wpsbom scan [flags] [ROOT]   scan ROOT (default "/": the running system)
+  wpsbom upgrade [--check] [--force] [VERSION]
+                               replace this binary with the latest (or given) release
   wpsbom version
 
 Examples:
@@ -49,6 +52,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 	switch args[0] {
 	case "scan":
 		return scan(ctx, args[1:], stdout)
+	case "upgrade":
+		return upgradeCmd(ctx, args[1:])
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, wpsbom.Version)
 		return nil
@@ -164,4 +169,18 @@ func write(out output, stdout io.Writer, encode func(io.Writer) error) error {
 		return fmt.Errorf("%s: %w", out.file, err)
 	}
 	return f.Close()
+}
+
+func upgradeCmd(ctx context.Context, args []string) error {
+	f := flag.NewFlagSet("upgrade", flag.ContinueOnError)
+	check := f.Bool("check", false, "only report whether a newer release exists")
+	force := f.Bool("force", false, "install even over a development build or the same version")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	o := upgrade.Options{Current: wpsbom.Version, CheckOnly: *check, Force: *force, Log: os.Stderr}
+	if f.NArg() > 0 {
+		o.Target = f.Arg(0)
+	}
+	return upgrade.Run(ctx, o)
 }
