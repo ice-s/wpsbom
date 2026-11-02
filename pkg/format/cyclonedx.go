@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 
 	cdx "github.com/CycloneDX/cyclonedx-go"
@@ -29,7 +30,39 @@ const (
 	propKernel        = "wpsbom:os:kernel"
 	propHostname      = "wpsbom:os:hostname"
 	propDistro        = "wpsbom:os:distro"
+
+	// Language packages and the applications they belong to.
+	propLocation    = "wpsbom:package:location"
+	propDev         = "wpsbom:package:dev"
+	propAppDir      = "wpsbom:app:dir"
+	propAppManifest = "wpsbom:app:manifest"
+
+	// Images: per package the layer that added it; on the image component, the layer list as
+	// "wpsbom:image:layer:<n>:diff-id" / ":created-by" / ":base" (n from 1, bottom first).
+	propLayerDiffID = "wpsbom:image:layer:diff-id"
+	propLayerIndex  = "wpsbom:image:layer:index"
+	propBaseLayer   = "wpsbom:image:layer:base"
+	propImageRef    = "wpsbom:image:ref"
+	propImageID     = "wpsbom:image:id"
+	propImageOS     = "wpsbom:image:os"
+	propImageArch   = "wpsbom:image:arch"
+	propBaseKnown   = "wpsbom:image:base-known"
+
+	// Containers running on a host: "wpsbom:container:<n>:id" / ":name" / ":image" / ":digest".
+	propContainer = "wpsbom:container"
 )
+
+// PackageRef is a package's bom-ref: its PURL, plus where it was found for language packages
+// (the same version can be in several applications).
+func PackageRef(p inventory.Package) string {
+	if p.Location == "" {
+		return p.PURL
+	}
+	return p.PURL + "#" + p.Location
+}
+
+// AppRef is an application's bom-ref.
+func AppRef(a inventory.App) string { return "app:" + a.Manifest }
 
 // CycloneDX writes a CycloneDX 1.6 JSON SBOM.
 func CycloneDX(w io.Writer, inv *inventory.Inventory, opts Options) error {
@@ -44,8 +77,10 @@ func CycloneDXXML(w io.Writer, inv *inventory.Inventory, opts Options) error {
 		EncodeVersion(cycloneDXBOM(inv, opts), cdx.SpecVersion1_6)
 }
 
-// cycloneDXBOM builds the BOM: metadata.component describes the operating system; each
-// installed package is a library component identified by its PURL.
+// cycloneDXBOM builds the BOM: metadata.component describes the operating system (or the image,
+// which then lists its operating system as a component); each installed package is a library
+// component identified by its PURL; each application is an application component that depends
+// on its direct dependencies.
 func cycloneDXBOM(inv *inventory.Inventory, opts Options) *cdx.BOM {
 	bom := cdx.NewBOM()
 	bom.Metadata = &cdx.Metadata{
@@ -56,24 +91,63 @@ func cycloneDXBOM(inv *inventory.Inventory, opts Options) *cdx.BOM {
 		}}},
 		Component: osComponent(inv),
 	}
+	var extra []cdx.Component
+	if inv.Image != nil {
+		extra = append(extra, *bom.Metadata.Component)
+		bom.Metadata.Component = imageComponent(inv.Image)
+	}
+	if len(inv.Containers) > 0 {
+		props := *orEmpty(bom.Metadata.Component.Properties)
+		for i, c := range inv.Containers {
+			n := fmt.Sprintf("%s:%d:", propContainer, i+1)
+			props = append(props, *propsList(n+"id", c.ID, n+"name", c.Name, n+"image", c.Image, n+"digest", c.Digest)...)
+		}
+		bom.Metadata.Component.Properties = &props
+	}
 	if !opts.Reproducible {
 		bom.SerialNumber = "urn:uuid:" + uuid4()
 		bom.Metadata.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	comps := make([]cdx.Component, 0, len(inv.Packages))
+	comps := make([]cdx.Component, 0, len(extra)+len(inv.Apps)+len(inv.Packages))
+	comps = append(comps, extra...)
+	direct := map[string][]string{}
+	for _, a := range inv.Apps {
+		comps = append(comps, cdx.Component{
+			BOMRef:     AppRef(a),
+			Type:       cdx.ComponentTypeApplication,
+			Name:       a.Name,
+			Version:    a.Version,
+			Properties: props(propPackageType, a.Type, propAppDir, a.Dir, propAppManifest, a.Manifest),
+		})
+		direct[a.Manifest] = []string{}
+	}
 	for _, p := range inv.Packages {
+		kv := []string{
+			propPackageType, p.Type,
+			propSourceName, p.Source,
+			propSourceVersion, p.SourceVersion,
+			propLocation, p.Location,
+		}
+		if p.Dev {
+			kv = append(kv, propDev, "true")
+		}
+		if l := layerOf(inv, p); l != nil {
+			kv = append(kv, propLayerIndex, strconv.Itoa(p.Layer), propLayerDiffID, l.DiffID)
+			if l.Base {
+				kv = append(kv, propBaseLayer, "true")
+			}
+		}
 		c := cdx.Component{
-			BOMRef:     p.PURL,
+			BOMRef:     PackageRef(p),
 			Type:       cdx.ComponentTypeLibrary,
 			Name:       p.Name,
 			Version:    p.Version,
 			PackageURL: p.PURL,
-			Properties: props(
-				propPackageType, p.Type,
-				propSourceName, p.Source,
-				propSourceVersion, p.SourceVersion,
-			),
+			Properties: props(kv...),
+		}
+		if p.Direct && p.Location != "" {
+			direct[p.Location] = append(direct[p.Location], c.BOMRef)
 		}
 		if len(p.Licenses) > 0 {
 			ls := make(cdx.Licenses, 0, len(p.Licenses))
@@ -85,8 +159,64 @@ func cycloneDXBOM(inv *inventory.Inventory, opts Options) *cdx.BOM {
 		comps = append(comps, c)
 	}
 	bom.Components = &comps
+	if len(inv.Apps) > 0 {
+		deps := make([]cdx.Dependency, 0, len(inv.Apps)+1)
+		apps := make([]string, 0, len(inv.Apps))
+		for _, a := range inv.Apps {
+			refs := direct[a.Manifest]
+			deps = append(deps, cdx.Dependency{Ref: AppRef(a), Dependencies: &refs})
+			apps = append(apps, AppRef(a))
+		}
+		if ref := bom.Metadata.Component.BOMRef; ref != "" {
+			deps = append([]cdx.Dependency{{Ref: ref, Dependencies: &apps}}, deps...)
+		}
+		bom.Dependencies = &deps
+	}
 	return bom
 }
+
+// layerOf returns the image layer a package came from, if any.
+func layerOf(inv *inventory.Inventory, p inventory.Package) *inventory.Layer {
+	if inv.Image == nil || p.Layer < 1 || p.Layer > len(inv.Image.Layers) {
+		return nil
+	}
+	return &inv.Image.Layers[p.Layer-1]
+}
+
+func imageComponent(img *inventory.Image) *cdx.Component {
+	c := &cdx.Component{
+		Type:    cdx.ComponentTypeContainer,
+		BOMRef:  "image:" + img.Digest,
+		Name:    img.Repo,
+		Version: img.Digest,
+	}
+	if c.Name == "" {
+		c.Name = img.Ref
+	}
+	kv := []string{propImageRef, img.Ref, propImageID, img.ID, propImageOS, img.OS, propImageArch, img.Arch}
+	if img.BaseKnown {
+		kv = append(kv, propBaseKnown, "true")
+	}
+	for i, l := range img.Layers {
+		n := fmt.Sprintf("wpsbom:image:layer:%d:", i+1)
+		kv = append(kv, n+"diff-id", l.DiffID, n+"created-by", l.CreatedBy)
+		if l.Base {
+			kv = append(kv, n+"base", "true")
+		}
+	}
+	c.Properties = props(kv...)
+	return c
+}
+
+func orEmpty(p *[]cdx.Property) *[]cdx.Property {
+	if p == nil {
+		return &[]cdx.Property{}
+	}
+	return p
+}
+
+// propsList is props that never returns nil.
+func propsList(kv ...string) *[]cdx.Property { return orEmpty(props(kv...)) }
 
 func osComponent(inv *inventory.Inventory) *cdx.Component {
 	c := &cdx.Component{Type: cdx.ComponentTypeOS, Name: "unknown"}

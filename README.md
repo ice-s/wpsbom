@@ -1,7 +1,8 @@
 # wpsbom
 
 SBOM of an operating system's installed packages, read straight from the package
-manager's database. One static binary, no root, under a second.
+manager's database, plus the applications in the source directories you point it at, and of
+container images layer by layer. One static binary, no root for host scans.
 
 ```console
 $ wpsbom scan / -o table
@@ -39,8 +40,8 @@ pkg:apk/alpine/libcrypto3@3.3.2-r0?arch=x86_64&distro=alpine-3.20.3&upstream=ope
 | dpkg (`/var/lib/dpkg/status`, distroless `status.d/`) | Debian, Ubuntu and derivatives |
 | apk (`/lib/apk/db/installed`) | Alpine, Wolfi |
 
-Planned: rpm (RHEL, Rocky, Alma, Fedora, SUSE, Amazon Linux), scanning container images
-directly, and `push`/`agent` commands to send the SBOM to a server on a schedule.
+Planned: rpm (RHEL, Rocky, Alma, Fedora, SUSE, Amazon Linux), Maven/Gradle and NuGet lock
+files, pnpm-lock.yaml.
 
 ## Output formats
 
@@ -97,6 +98,12 @@ wpsbom scan [flags] [ROOT]
   -o FORMAT[=FILE]          output format, repeatable; without =FILE it goes to stdout
                             (default cyclonedx-json)
   -file PATH                write the single output to a file
+  -out-dir DIR              one file per SBOM (several --image, --docker)
+  -path DIR                 source directory to search for applications, repeatable
+  -image REF                scan a container image instead of ROOT, repeatable
+  -base-image REF           the image's base image, to tell its layers apart exactly
+  -image-path DIR           extra application directory inside images, repeatable
+  -docker                   also scan the image of every running container
   -reproducible             no serial number or timestamp: same system, same bytes
   -hostname                 record the hostname as is (default: a hash of it)
 ```
@@ -110,7 +117,61 @@ docker export "$(docker create debian:12)" | tar -x -C rootfs
 wpsbom scan rootfs
 ```
 
-wpsbom only reads files and makes no network requests.
+`scan` only reads files and makes no network requests (except `--image registry:…`).
+
+### Applications: `--path`
+
+wpsbom does not search the whole disk for code. Name each source directory; lock files are
+looked for in it and below (dependency directories such as `node_modules/` and `vendor/` are
+skipped), one application per lock file:
+
+```sh
+wpsbom scan / --path /var/www/shop --path /srv/api -o table
+```
+
+| Ecosystem | Read | Direct dependencies from |
+|---|---|---|
+| PHP | `composer.lock` (only what `vendor/composer/installed.json` has, when present), or `installed.json` alone | `composer.json` |
+| Node.js | `package-lock.json` / `npm-shrinkwrap.json` (v1–v3), `yarn.lock` (classic and Berry) | `package.json` |
+| Python | `poetry.lock`, `Pipfile.lock`, pinned `requirements*.txt` | `pyproject.toml`, `Pipfile` |
+| Go | `go.mod`; executables with Go build info (their modules and Go version) | `// indirect` |
+| Ruby | `Gemfile.lock` | its `DEPENDENCIES` |
+
+Each package records the lock file it came from and whether it is direct or a development
+dependency; in CycloneDX every application is an `application` component that depends on its
+direct dependencies.
+
+### Container images: `--image`, `--docker`
+
+```sh
+wpsbom scan --image nginx:1.27 -o table           # local daemon, else the registry
+wpsbom scan --image registry:ghcr.io/acme/shop@sha256:…
+wpsbom scan --image docker-archive:shop.tar       # docker save output; oci-dir:DIR for OCI layouts
+wpsbom scan --image ghcr.io/acme/shop:1.4 --base-image php:8.3-fpm
+wpsbom scan / --docker --out-dir sboms/           # the host + the image of every running container
+```
+
+Layers are replayed one by one (only package databases, lock files and executables in
+application directories are extracted), so every package records the layer that added it and
+whether that layer belongs to the base image: exactly with `--base-image`, otherwise inferred from
+the history timestamps. Application directories in images: `WORKDIR`, `/app`, `/srv`, `/var/www`,
+`/usr/src/app`, `/opt/app`, `/code`, `/workspace`, `/home/app`, `/usr/local/bin`, plus `--image-path`.
+
+`--docker` needs the Docker socket; the host SBOM lists the running containers and each image
+SBOM is written separately.
+
+### Sending to Watchpost: `push`, `k8s`
+
+```sh
+export WPSBOM_TOKEN=wp_…                          # an API token from the Watchpost SBOM page
+wpsbom push / --project prod-01 --path /var/www/shop --docker
+wpsbom push --image ghcr.io/acme/shop:1.4 --fail-on kev    # CI: exit status 3 on a KEV finding
+wpsbom k8s --cluster k8s-prod --scan-images       # inside a cluster, see deploy/kubernetes.yaml
+```
+
+`k8s` lists running pods (RBAC: get/list pods only) and reports which image digest every
+workload runs; with `--scan-images` it also pulls and scans each image (credentials from
+`~/.docker/config.json`). `Dockerfile` builds the image the CronJob uses.
 
 ## As a Go library
 

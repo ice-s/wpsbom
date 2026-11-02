@@ -1,4 +1,5 @@
-// Package wpsbom scans a root file system for its operating system and installed packages.
+// Package wpsbom scans a root file system for its operating system, installed packages and the
+// applications in the source directories it is given.
 package wpsbom
 
 import (
@@ -14,6 +15,7 @@ import (
 
 	"github.com/ice-s/wpsbom/pkg/collector/apk"
 	"github.com/ice-s/wpsbom/pkg/collector/dpkg"
+	"github.com/ice-s/wpsbom/pkg/collector/lang"
 	"github.com/ice-s/wpsbom/pkg/collector/osrelease"
 	"github.com/ice-s/wpsbom/pkg/inventory"
 	"github.com/ice-s/wpsbom/pkg/purl"
@@ -29,6 +31,9 @@ type Options struct {
 	Live bool
 	// RevealHostname reports the hostname as is instead of a hash of it.
 	RevealHostname bool
+	// Paths are source directories (absolute inside the root) searched for applications and
+	// their lock files, or Go binaries. Nothing outside them is searched.
+	Paths []string
 }
 
 // Collector lists one package manager's installed packages; nil without its database.
@@ -63,22 +68,21 @@ func Scan(ctx context.Context, fsys fs.FS, opts Options) (*inventory.Inventory, 
 		}
 		inv.Packages = append(inv.Packages, pkgs...)
 	}
-	if distro == nil && len(inv.Packages) == 0 {
-		return nil, ErrNothingFound
-	}
 	for i := range inv.Packages {
 		inv.Packages[i].PURL = purl.For(inv.Packages[i], distro)
 	}
-	sort.Slice(inv.Packages, func(i, j int) bool {
-		a, b := inv.Packages[i], inv.Packages[j]
-		if a.Type != b.Type {
-			return a.Type < b.Type
+	if len(opts.Paths) > 0 {
+		apps, pkgs, err := lang.Collect(fsys, opts.Paths)
+		if err != nil {
+			return nil, err
 		}
-		if a.Name != b.Name {
-			return a.Name < b.Name
-		}
-		return a.Arch < b.Arch
-	})
+		inv.Apps = apps
+		inv.Packages = append(inv.Packages, pkgs...)
+	}
+	if distro == nil && len(inv.Packages) == 0 && len(inv.Apps) == 0 {
+		return nil, ErrNothingFound
+	}
+	SortPackages(inv.Packages)
 
 	if opts.Live {
 		if b, err := fs.ReadFile(fsys, "proc/sys/kernel/osrelease"); err == nil {
@@ -93,4 +97,25 @@ func Scan(ctx context.Context, fsys fs.FS, opts Options) (*inventory.Inventory, 
 		}
 	}
 	return inv, nil
+}
+
+// SortPackages orders packages by type, name, architecture, then location: OS packages, then
+// each language's, stable from one scan to the next.
+func SortPackages(ps []inventory.Package) {
+	sort.SliceStable(ps, func(i, j int) bool {
+		a, b := ps[i], ps[j]
+		if a.Type != b.Type {
+			return a.Type < b.Type
+		}
+		if a.Name != b.Name {
+			return a.Name < b.Name
+		}
+		if a.Arch != b.Arch {
+			return a.Arch < b.Arch
+		}
+		if a.Location != b.Location {
+			return a.Location < b.Location
+		}
+		return a.Version < b.Version
+	})
 }

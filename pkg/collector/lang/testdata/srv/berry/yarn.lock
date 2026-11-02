@@ -1,0 +1,11 @@
+__metadata:
+  version: 6
+  cacheKey: 8
+
+"b@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "b@workspace:."
+
+"lodash@npm:^4.17.21":
+  version: 4.17.21
+  resolution: "lodash@npm:4.17.21"

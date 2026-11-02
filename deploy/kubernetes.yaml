@@ -1,0 +1,81 @@
+# wpsbom in a Kubernetes cluster: every 6 hours, report which image digest each workload runs
+# (and, with --scan-images, scan those images) to Watchpost.
+#
+#   kubectl create namespace wpsbom
+#   kubectl -n wpsbom create secret generic wpsbom --from-literal=token=wp_…
+#   kubectl apply -f deploy/kubernetes.yaml
+#
+# It reads pods only: no exec, no secrets, no write access.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wpsbom
+  namespace: wpsbom
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wpsbom-read-pods
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wpsbom-read-pods
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: wpsbom-read-pods
+subjects:
+  - kind: ServiceAccount
+    name: wpsbom
+    namespace: wpsbom
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: wpsbom
+  namespace: wpsbom
+spec:
+  schedule: "17 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          serviceAccountName: wpsbom
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: wpsbom
+              image: ghcr.io/ice-s/wpsbom:latest
+              # Change the cluster name; drop --scan-images to only report workloads (images then
+              # need SBOMs from CI: wpsbom push --image …).
+              args: ["k8s", "--cluster", "k8s-prod", "--scan-images"]
+              env:
+                - name: WPSBOM_TOKEN
+                  valueFrom: { secretKeyRef: { name: wpsbom, key: token } }
+                # Private registries: mount a docker config.json and set DOCKER_CONFIG to its directory.
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 1Gi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: false
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: tmp
+              emptyDir: { sizeLimit: 4Gi }

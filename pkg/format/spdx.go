@@ -108,6 +108,25 @@ func SPDX(w io.Writer, inv *inventory.Inventory, opts Options) error {
 	doc.Packages = append(doc.Packages, osPkg)
 	doc.Relationships = append(doc.Relationships, spdxRelationship{"SPDXRef-DOCUMENT", "DESCRIBES", spdxOSID})
 
+	// Each application is described by the document too, and contains its dependencies.
+	appIDs := map[string]string{}
+	for i, a := range inv.Apps {
+		id := fmt.Sprintf("SPDXRef-Application-%s-%d", spdxIDChars.ReplaceAllString(a.Name, "-"), i)
+		appIDs[a.Manifest] = id
+		doc.Packages = append(doc.Packages, spdxPackage{
+			Name:                  a.Name,
+			SPDXID:                id,
+			VersionInfo:           a.Version,
+			DownloadLocation:      noAssertion,
+			LicenseConcluded:      noAssertion,
+			LicenseDeclared:       noAssertion,
+			CopyrightText:         noAssertion,
+			Description:           a.Type + " application in " + a.Dir + " (" + a.Manifest + ")",
+			PrimaryPackagePurpose: "APPLICATION",
+		})
+		doc.Relationships = append(doc.Relationships, spdxRelationship{"SPDXRef-DOCUMENT", "DESCRIBES", id})
+	}
+
 	for i, p := range inv.Packages {
 		id := fmt.Sprintf("SPDXRef-Package-%s-%s-%d", p.Type, spdxIDChars.ReplaceAllString(p.Name, "-"), i)
 		sp := spdxPackage{
@@ -125,8 +144,20 @@ func SPDX(w io.Writer, inv *inventory.Inventory, opts Options) error {
 		if p.PURL != "" {
 			sp.ExternalRefs = []spdxExternalRef{{"PACKAGE-MANAGER", "purl", p.PURL}}
 		}
+		if p.Location != "" {
+			sp.PrimaryPackagePurpose = "LIBRARY"
+		}
 		doc.Packages = append(doc.Packages, sp)
-		doc.Relationships = append(doc.Relationships, spdxRelationship{spdxOSID, "CONTAINS", id})
+		switch app, ok := appIDs[p.Location]; {
+		case !ok:
+			doc.Relationships = append(doc.Relationships, spdxRelationship{spdxOSID, "CONTAINS", id})
+		case p.Direct && p.Dev:
+			doc.Relationships = append(doc.Relationships, spdxRelationship{id, "DEV_DEPENDENCY_OF", app})
+		case p.Direct:
+			doc.Relationships = append(doc.Relationships, spdxRelationship{app, "DEPENDS_ON", id})
+		default:
+			doc.Relationships = append(doc.Relationships, spdxRelationship{app, "CONTAINS", id})
+		}
 	}
 
 	enc := json.NewEncoder(w)

@@ -1,7 +1,9 @@
-// Package purl builds Package URLs (https://github.com/package-url/purl-spec) for OS packages.
+// Package purl builds Package URLs (https://github.com/package-url/purl-spec) for OS and language packages.
 package purl
 
 import (
+	"strings"
+
 	"github.com/package-url/packageurl-go"
 
 	"github.com/ice-s/wpsbom/pkg/inventory"
@@ -41,4 +43,26 @@ func For(p inventory.Package, d *inventory.Distro) string {
 		q["upstream"] = up
 	}
 	return packageurl.NewPackageURL(p.Type, ns, p.Name, p.Version, packageurl.QualifiersFromMap(q), "").ToString()
+}
+
+// ForLang builds the PURL of a language package: name is as the ecosystem writes it
+// ("laravel/framework", "@babel/core", "github.com/gin-gonic/gin", "requests").
+func ForLang(typ, name, version string) string {
+	ns, n := "", name
+	switch typ {
+	case inventory.TypeComposer, inventory.TypeGolang:
+		if i := strings.LastIndex(name, "/"); i > 0 {
+			ns, n = name[:i], name[i+1:]
+		}
+	case inventory.TypeNpm:
+		if strings.HasPrefix(name, "@") {
+			if i := strings.Index(name, "/"); i > 0 {
+				ns, n = name[:i], name[i+1:]
+			}
+		}
+	case inventory.TypePyPI:
+		// The PURL spec lower-cases PyPI names and writes "_" as "-".
+		n = strings.ReplaceAll(strings.ToLower(name), "_", "-")
+	}
+	return packageurl.NewPackageURL(typ, ns, n, version, nil, "").ToString()
 }

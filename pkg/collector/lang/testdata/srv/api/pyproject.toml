@@ -1,0 +1,10 @@
+[tool.poetry]
+name = "acme-api"
+version = "0.1.0"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+Django = "^4.2"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4"
