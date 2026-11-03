@@ -127,4 +127,7 @@ type Inventory struct {
 	Image *Image
 	// Containers running on the host (scan --docker).
 	Containers []Container
+	// Images of those containers, scanned with the host and written into its CycloneDX SBOM as
+	// nested container components, so one upload holds the host and everything running on it.
+	Images []*Inventory
 }

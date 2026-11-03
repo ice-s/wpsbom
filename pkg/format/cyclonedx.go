@@ -109,12 +109,44 @@ func cycloneDXBOM(inv *inventory.Inventory, opts Options) *cdx.BOM {
 		bom.Metadata.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	comps := make([]cdx.Component, 0, len(extra)+len(inv.Apps)+len(inv.Packages))
-	comps = append(comps, extra...)
+	comps, deps := inventoryComponents(inv, "", bom.Metadata.Component.BOMRef)
+	comps = append(extra, comps...)
+	// Images of the host's containers: one container component each, holding its own OS,
+	// applications and packages (bom-refs prefixed with the image's, so they stay unique).
+	for _, img := range inv.Images {
+		if img.Image == nil {
+			continue
+		}
+		c := imageComponent(img.Image)
+		prefix := c.BOMRef + "/"
+		nested := []cdx.Component{}
+		if img.Distro != nil {
+			osc := osComponent(img)
+			osc.BOMRef = prefix + osc.BOMRef
+			nested = append(nested, *osc)
+		}
+		ic, idep := inventoryComponents(img, prefix, c.BOMRef)
+		nested = append(nested, ic...)
+		c.Components = &nested
+		comps = append(comps, *c)
+		deps = append(deps, idep...)
+	}
+	bom.Components = &comps
+	if len(deps) > 0 {
+		bom.Dependencies = &deps
+	}
+	return bom
+}
+
+// inventoryComponents lists an inventory's applications and packages, bom-refs prefixed with
+// prefix, and the dependency graph: root depends on the applications, each application on its
+// direct dependencies.
+func inventoryComponents(inv *inventory.Inventory, prefix, root string) ([]cdx.Component, []cdx.Dependency) {
+	comps := make([]cdx.Component, 0, len(inv.Apps)+len(inv.Packages))
 	direct := map[string][]string{}
 	for _, a := range inv.Apps {
 		comps = append(comps, cdx.Component{
-			BOMRef:     AppRef(a),
+			BOMRef:     prefix + AppRef(a),
 			Type:       cdx.ComponentTypeApplication,
 			Name:       a.Name,
 			Version:    a.Version,
@@ -139,7 +171,7 @@ func cycloneDXBOM(inv *inventory.Inventory, opts Options) *cdx.BOM {
 			}
 		}
 		c := cdx.Component{
-			BOMRef:     PackageRef(p),
+			BOMRef:     prefix + PackageRef(p),
 			Type:       cdx.ComponentTypeLibrary,
 			Name:       p.Name,
 			Version:    p.Version,
@@ -158,24 +190,23 @@ func cycloneDXBOM(inv *inventory.Inventory, opts Options) *cdx.BOM {
 		}
 		comps = append(comps, c)
 	}
-	bom.Components = &comps
-	if len(inv.Apps) > 0 {
-		deps := make([]cdx.Dependency, 0, len(inv.Apps)+1)
-		apps := make([]string, 0, len(inv.Apps))
-		for _, a := range inv.Apps {
-			apps = append(apps, AppRef(a))
-			// Without known direct dependencies (installed Python packages, binaries) the graph says
-			// nothing rather than "none of them is direct".
-			if refs := direct[a.Manifest]; len(refs) > 0 {
-				deps = append(deps, cdx.Dependency{Ref: AppRef(a), Dependencies: &refs})
-			}
-		}
-		if ref := bom.Metadata.Component.BOMRef; ref != "" {
-			deps = append([]cdx.Dependency{{Ref: ref, Dependencies: &apps}}, deps...)
-		}
-		bom.Dependencies = &deps
+	if len(inv.Apps) == 0 {
+		return comps, nil
 	}
-	return bom
+	deps := make([]cdx.Dependency, 0, len(inv.Apps)+1)
+	apps := make([]string, 0, len(inv.Apps))
+	for _, a := range inv.Apps {
+		apps = append(apps, prefix+AppRef(a))
+		// Without known direct dependencies (installed Python packages, binaries) the graph says
+		// nothing rather than "none of them is direct".
+		if refs := direct[a.Manifest]; len(refs) > 0 {
+			deps = append(deps, cdx.Dependency{Ref: prefix + AppRef(a), Dependencies: &refs})
+		}
+	}
+	if root != "" {
+		deps = append([]cdx.Dependency{{Ref: root, Dependencies: &apps}}, deps...)
+	}
+	return comps, deps
 }
 
 // layerOf returns the image layer a package came from, if any.

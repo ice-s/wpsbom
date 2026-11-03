@@ -104,6 +104,7 @@ wpsbom scan [flags] [ROOT]
   -base-image REF           the image's base image, to tell its layers apart exactly
   -image-path DIR           extra application directory inside images, repeatable
   -docker                   also scan every running container (in place, needs root)
+  -split                    with --docker: one SBOM per image instead of one for everything
   -layers                   with --docker: export images to record layers (slower)
   -no-os                    application libraries only, no OS packages
   -quiet                    no progress messages
@@ -151,8 +152,9 @@ wpsbom scan --image nginx:1.27 -o table           # local daemon, else the regis
 wpsbom scan --image registry:ghcr.io/acme/shop@sha256:…
 wpsbom scan --image docker-archive:shop.tar       # docker save output; oci-dir:DIR for OCI layouts
 wpsbom scan --image ghcr.io/acme/shop:1.4 --base-image php:8.3-fpm
-wpsbom scan / --docker --out-dir sboms/           # the host + every running container
-wpsbom scan / --docker --no-os --out-dir sboms/   # application libraries only
+wpsbom scan / --docker -o cyclonedx-json=server.cdx.json   # the host + every running container
+wpsbom scan / --docker --no-os -o cyclonedx-json=server.cdx.json   # application libraries only
+wpsbom scan / --docker --split --out-dir sboms/   # one file per image instead
 ```
 
 Layers are replayed one by one (only package databases, lock files and executables in
@@ -163,8 +165,10 @@ the history timestamps. Application directories in images: `WORKDIR`, `/app`, `/
 
 `--docker` reads every running container where it is, in seconds: its file system as Docker
 mounted it on the host (overlay2), plus bind mounts and volumes over its application
-directories, read at their source (so `./src:/var/www/html` is found). It needs root. One SBOM
-per image; the host SBOM lists the containers. `--layers` exports each image instead (minutes,
+directories, read at their source (so `./src:/var/www/html` is found). It needs root. In
+CycloneDX each image becomes a `container` component of the host's SBOM, nesting its own OS,
+applications and packages: one file, and one Watchpost project when pushed. `--split` writes
+one SBOM per image instead (the flat formats, table, CSV and SPDX, always do). `--layers` exports each image instead (minutes,
 temporary space in `/tmp`) to record the layer every package came from; other storage drivers
 fall back to that automatically.
 
@@ -178,7 +182,7 @@ stdout; `push --out-dir DIR` also keeps the SBOMs it sent.
 
 ```sh
 export WPSBOM_TOKEN=wp_…                          # an API token from the Watchpost SBOM page
-wpsbom push / --project prod-01 --path /var/www/shop --docker
+wpsbom push / --project prod-01 --path /var/www/shop --docker   # one project: host + containers
 wpsbom push --image ghcr.io/acme/shop:1.4 --fail-on kev    # CI: exit status 3 on a KEV finding
 wpsbom k8s --cluster k8s-prod --scan-images       # inside a cluster, see deploy/kubernetes.yaml
 ```

@@ -44,7 +44,7 @@ Examples:
   wpsbom scan / -o table
   wpsbom scan / --path /var/www/shop --path /srv/api > sbom.cdx.json
   wpsbom scan --image ghcr.io/acme/shop:1.4 -o table
-  wpsbom scan --docker --out-dir sboms/
+  wpsbom scan / --docker -o cyclonedx-json=server.cdx.json
   wpsbom push / --project prod-01 --path /var/www/shop --docker
   wpsbom k8s --cluster k8s-prod --scan-images
 
@@ -125,6 +125,7 @@ type opts struct {
 	baseImage  string
 	imagePaths list
 	docker     bool
+	split      bool
 	layers     bool
 	noOS       bool
 	quiet      bool
@@ -159,7 +160,9 @@ func newFlags(cmd string, o *opts) *flag.FlagSet {
 		f.StringVar(&o.baseImage, "base-image", "", "the image's base image `REF` (FROM …), to tell its layers apart exactly")
 		f.Var(&o.imagePaths, "image-path", "extra application `DIR` inside images (besides WORKDIR, /app, /var/www, /srv, …); repeatable")
 		f.BoolVar(&o.docker, "docker", false, "also scan every running Docker container in place: its application libraries\n"+
-			"(and OS packages unless --no-os), bind mounts included; one SBOM per image (needs root)")
+			"(and OS packages unless --no-os), bind mounts included; written into the host's SBOM, one\n"+
+			"container component per image (needs root)")
+		f.BoolVar(&o.split, "split", false, "with --docker: one SBOM per image instead (push: one project per image)")
 		f.BoolVar(&o.layers, "layers", false, "with --docker: export each image instead, to record the layer every package came from (slower)")
 		f.BoolVar(&o.noOS, "no-os", false, "leave out operating system packages: application libraries only (host, images, containers)")
 		f.BoolVar(&o.quiet, "quiet", false, "no progress messages on stderr")
@@ -224,6 +227,27 @@ type sbom struct {
 	inv  *inventory.Inventory
 	kind string // "host" or "image"
 	name string // file / project name
+	// docker: the image of a container running on the host (--docker), not one asked for with --image.
+	docker bool
+}
+
+// merged puts the --docker images into the host's SBOM (unless --split): one CycloneDX
+// document, and one project when pushed. Explicit --image scans stay on their own.
+func merged(sboms []sbom, o *opts) []sbom {
+	if o.split || len(sboms) == 0 || sboms[0].kind != "host" {
+		return sboms
+	}
+	host := *sboms[0].inv
+	host.Images = nil
+	out := []sbom{{inv: &host, kind: "host", name: sboms[0].name}}
+	for _, s := range sboms[1:] {
+		if s.docker {
+			host.Images = append(host.Images, s.inv)
+		} else {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // collect runs the scans the flags ask for: the host (ROOT and its --path directories) unless
@@ -254,19 +278,19 @@ func collect(ctx context.Context, root string, o *opts) ([]sbom, error) {
 
 	var out []sbom
 	seen := map[string]bool{}
-	keep := func(inv *inventory.Inventory) {
+	keep := func(inv *inventory.Inventory, docker bool) {
 		if !seen[inv.Image.Digest] {
 			seen[inv.Image.Digest] = true
-			out = append(out, sbom{inv: inv, kind: "image", name: push.ProjectName(firstNonEmpty(inv.Image.Repo, inv.Image.Ref))})
+			out = append(out, sbom{inv: inv, kind: "image", name: push.ProjectName(firstNonEmpty(inv.Image.Repo, inv.Image.Ref)), docker: docker})
 		}
 	}
-	addImage := func(src *image.Source) (*inventory.Inventory, error) {
+	addImage := func(src *image.Source, docker bool) (*inventory.Inventory, error) {
 		defer src.Close()
 		inv, err := image.Scan(ctx, src, imgOpts)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", src.Meta.Ref, err)
 		}
-		keep(inv)
+		keep(inv, docker)
 		return inv, nil
 	}
 	for _, ref := range o.images {
@@ -275,7 +299,7 @@ func collect(ctx context.Context, root string, o *opts) ([]sbom, error) {
 		if err != nil {
 			return nil, err
 		}
-		inv, err := addImage(src)
+		inv, err := addImage(src, false)
 		if err != nil {
 			return nil, err
 		}
@@ -332,11 +356,11 @@ func collect(ctx context.Context, root string, o *opts) ([]sbom, error) {
 					if src.Meta.Repo == "" {
 						src.Meta.Repo = repoOfRef(ct.Image)
 					}
-					if inv, err = addImage(src); err != nil {
+					if inv, err = addImage(src, true); err != nil {
 						return nil, err
 					}
 				} else {
-					keep(inv)
+					keep(inv, true)
 				}
 				progress("%s: %s", label, summary(inv))
 				digests[ct.ImageID] = inv.Image.Digest
@@ -402,17 +426,27 @@ func scanCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	opts := format.Options{ToolVersion: wpsbom.Version, Reproducible: o.reproducible}
+	// CycloneDX holds the containers' images inside the host's SBOM; the other formats are flat,
+	// so they keep one file per image.
+	nested := merged(sboms, &o)
+	isCDX := func(f string) bool { return strings.HasPrefix(f, "cyclonedx-") }
+	listFor := func(f string) []sbom {
+		if isCDX(f) {
+			return nested
+		}
+		return sboms
+	}
 
 	if o.outDir != "" {
 		if err := os.MkdirAll(o.outDir, 0o755); err != nil {
 			return err
 		}
-		for _, s := range sboms {
-			base := s.kind + "-" + unsafeFile.ReplaceAllString(s.name, "_")
-			if s.inv.Image != nil {
-				base += "-" + shortID(strings.TrimPrefix(s.inv.Image.Digest, "sha256:"))
-			}
-			for _, out := range outs {
+		for _, out := range outs {
+			for _, s := range listFor(out.format) {
+				base := s.kind + "-" + unsafeFile.ReplaceAllString(s.name, "_")
+				if s.inv.Image != nil {
+					base += "-" + shortID(strings.TrimPrefix(s.inv.Image.Digest, "sha256:"))
+				}
 				file := filepath.Join(o.outDir, base+fileExt[out.format])
 				if err := write(output{out.format, file}, stdout, encoder(out.format, s.inv, opts)); err != nil {
 					return err
@@ -422,8 +456,10 @@ func scanCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		}
 		return nil
 	}
-	if len(sboms) > 1 {
-		return fmt.Errorf("this scan gives %d SBOMs (host and images): write them with --out-dir DIR", len(sboms))
+	for _, out := range outs {
+		if list := listFor(out.format); len(list) > 1 {
+			return fmt.Errorf("this scan gives %d SBOMs (host and images) in %s: write them with --out-dir DIR", len(list), out.format)
+		}
 	}
 
 	toStdout := 0
@@ -439,7 +475,7 @@ func scanCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		return errors.New("several outputs to stdout: give each -o a file (-o FORMAT=FILE)")
 	}
 	for _, out := range outs {
-		if err := write(out, stdout, encoder(out.format, sboms[0].inv, opts)); err != nil {
+		if err := write(out, stdout, encoder(out.format, listFor(out.format)[0].inv, opts)); err != nil {
 			return err
 		}
 	}
@@ -487,10 +523,12 @@ func pushCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	if err := checkFailOn(o.failOn); err != nil {
 		return err
 	}
-	sboms, err := collect(ctx, root, &o)
+	all, err := collect(ctx, root, &o)
 	if err != nil {
 		return err
 	}
+	// The host and its containers' images go up as one project, unless --split.
+	sboms := merged(all, &o)
 	hasHost := sboms[0].kind == "host"
 	if hasHost && o.project == "" {
 		return errors.New("--project NAME is required for a host scan")

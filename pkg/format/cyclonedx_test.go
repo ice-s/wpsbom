@@ -86,3 +86,44 @@ func TestCycloneDXRoundTrip(t *testing.T) {
 		t.Errorf("purl: %s", p)
 	}
 }
+
+// A host scanned with --docker carries its containers' images as nested container components,
+// each with its own OS and packages under bom-refs prefixed by the image's.
+func TestCycloneDXNestedImages(t *testing.T) {
+	host := sample()
+	img := sample()
+	img.Kernel = ""
+	img.Image = &inventory.Image{Ref: "acme/shop:1.4", Repo: "acme/shop", Digest: "sha256:abc"}
+	img.Apps = []inventory.App{{Name: "shop", Type: "composer", Dir: "/app", Manifest: "/app/composer.lock"}}
+	img.Packages = append(img.Packages, inventory.Package{Type: "composer", Name: "guzzlehttp/guzzle", Version: "7.4.0", PURL: "pkg:composer/guzzlehttp/guzzle@7.4.0", Location: "/app/composer.lock", Direct: true})
+	host.Images = []*inventory.Inventory{img}
+
+	bom := cycloneDXBOM(host, Options{Reproducible: true})
+	var c *cdx.Component
+	for i := range *bom.Components {
+		if (*bom.Components)[i].Type == cdx.ComponentTypeContainer {
+			c = &(*bom.Components)[i]
+		}
+	}
+	if c == nil || c.BOMRef != "image:sha256:abc" || c.Components == nil {
+		t.Fatalf("no nested image component: %+v", c)
+	}
+	refs := map[string]bool{}
+	for _, n := range *c.Components {
+		refs[n.BOMRef] = true
+	}
+	for _, want := range []string{"image:sha256:abc/os:alpine-3.20.3", "image:sha256:abc/app:/app/composer.lock", "image:sha256:abc/pkg:composer/guzzlehttp/guzzle@7.4.0#/app/composer.lock"} {
+		if !refs[want] {
+			t.Errorf("missing nested %s in %v", want, refs)
+		}
+	}
+	found := false
+	for _, d := range *bom.Dependencies {
+		if d.Ref == "image:sha256:abc" && d.Dependencies != nil && (*d.Dependencies)[0] == "image:sha256:abc/app:/app/composer.lock" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("image → application dependency missing")
+	}
+}
