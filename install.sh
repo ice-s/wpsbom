@@ -44,6 +44,19 @@ main() {
 	[ -n "$archive" ] || fail "no build for $os/$arch in this release"
 	expected=$(awk -v a="$archive" '$2 == a { print $1 }' "$tmp/checksums.txt")
 
+	# With cosign installed, the checksum list must carry the release workflow's signature:
+	# checksums alone only catch a corrupt download, not a release someone swapped.
+	if command -v cosign >/dev/null 2>&1; then
+		fetch "$base/checksums.txt.sigstore.json" "$tmp/checksums.txt.sigstore.json" || fail "no signature for this release"
+		cosign verify-blob --bundle "$tmp/checksums.txt.sigstore.json" \
+			--certificate-identity-regexp '^https://github\.com/ice-s/wpsbom/\.github/workflows/release\.yml@refs/tags/v' \
+			--certificate-oidc-issuer https://token.actions.githubusercontent.com \
+			"$tmp/checksums.txt" >/dev/null 2>&1 || fail "signature check failed for checksums.txt"
+		log "signature verified (Sigstore)"
+	elif [ "${WPSBOM_REQUIRE_SIGNATURE:-}" = 1 ]; then
+		fail "WPSBOM_REQUIRE_SIGNATURE=1 but cosign is not installed"
+	fi
+
 	log "downloading $archive"
 	fetch "$base/$archive" "$tmp/$archive" || fail "download failed: $base/$archive"
 	actual=$(sha256 "$tmp/$archive")

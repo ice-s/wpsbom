@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -195,7 +196,17 @@ func wanted(name string, mode int64, size int64, dirs []string) bool {
 
 // apply replays one layer onto dir: whiteouts delete, wanted files and all directories and
 // symlinks under them are written. It reports whether a wanted file changed.
+//
+// The layer is hostile input: every path is resolved inside dir the way the container sees it
+// (symlinks included) and every write, removal and link goes through dir's os.Root, so nothing
+// can land outside it (a symlink "app" → "/" followed by "app/etc/cron.d/x", a whiteout through
+// such a link, a hard link to "../../etc/shadow"). Entries that would are skipped.
 func apply(dir string, l v1.Layer, dirs []string) (bool, error) {
+	fsys, err := rootfs.New(dir)
+	if err != nil {
+		return false, err
+	}
+	root := fsys.OSRoot()
 	rc, err := l.Uncompressed()
 	if err != nil {
 		return false, err
@@ -203,6 +214,14 @@ func apply(dir string, l v1.Layer, dirs []string) (bool, error) {
 	defer rc.Close()
 	tr := tar.NewReader(rc)
 	touched := false
+	// at: where name (a slash path inside the image) is, relative to dir, its parent resolved.
+	at := func(name string) (string, bool) {
+		parent, err := fsys.Rel(path.Dir(name))
+		if err != nil {
+			return "", false
+		}
+		return filepath.Join(parent, path.Base(name)), true
+	}
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -216,17 +235,22 @@ func apply(dir string, l v1.Layer, dirs []string) (bool, error) {
 			continue
 		}
 		base := path.Base(name)
-		target := filepath.Join(dir, filepath.FromSlash(name))
 		// Whiteouts: ".wh.X" deletes X from lower layers, ".wh..wh..opq" empties the directory.
 		if strings.HasPrefix(base, ".wh.") {
-			parent := filepath.Dir(target)
+			parent, err := fsys.Rel(path.Dir(name))
+			if err != nil {
+				continue
+			}
 			if base == ".wh..wh..opq" {
-				entries, _ := os.ReadDir(parent)
-				for _, e := range entries {
-					os.RemoveAll(filepath.Join(parent, e.Name()))
+				if d, err := root.Open(parent); err == nil {
+					entries, _ := d.ReadDir(-1)
+					d.Close()
+					for _, e := range entries {
+						root.RemoveAll(filepath.Join(parent, e.Name()))
+					}
 				}
 			} else {
-				os.RemoveAll(filepath.Join(parent, strings.TrimPrefix(base, ".wh.")))
+				root.RemoveAll(filepath.Join(parent, strings.TrimPrefix(base, ".wh.")))
 			}
 			touched = true
 			continue
@@ -237,26 +261,57 @@ func apply(dir string, l v1.Layer, dirs []string) (bool, error) {
 			if !osFiles[name] && !underDirs(name, dirs) && !isAncestor(name, dirs) {
 				continue
 			}
-			os.MkdirAll(filepath.Dir(target), 0o755)
-			os.RemoveAll(target)
-			if err := os.Symlink(h.Linkname, target); err != nil {
-				return touched, err
-			}
-			touched = true
-		case tar.TypeReg, tar.TypeLink:
-			if !wanted(name, h.Mode, h.Size, dirs) {
+			target, ok := at(name)
+			if !ok || root.MkdirAll(filepath.Dir(target), 0o755) != nil {
 				continue
 			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return touched, err
+			root.RemoveAll(target)
+			// The link's own text is never followed here: rootfs resolves it inside dir when read.
+			if root.Symlink(h.Linkname, target) == nil {
+				touched = true
 			}
-			os.RemoveAll(target)
+		case tar.TypeReg, tar.TypeLink:
+			if !wanted(name, h.Mode, h.Size, dirs) || h.Size > maxExtract {
+				continue
+			}
+			target, ok := at(name)
+			if !ok || root.MkdirAll(filepath.Dir(target), 0o755) != nil {
+				continue
+			}
+			root.RemoveAll(target)
+			var src io.Reader = tr
+			var linked *os.File
 			if h.Typeflag == tar.TypeLink {
-				src := filepath.Join(dir, filepath.FromSlash(strings.TrimPrefix(path.Clean("/"+h.Linkname), "/")))
-				if err := copyFile(src, target, os.FileMode(h.Mode)); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return touched, err
+				from, err := fsys.Rel(strings.TrimPrefix(path.Clean("/"+h.Linkname), "/"))
+				if err != nil {
+					continue
 				}
-			} else if err := writeFile(target, tr, os.FileMode(h.Mode)); err != nil {
+				in, err := root.Open(from)
+				if err != nil {
+					continue
+				}
+				fi, err := in.Stat()
+				if err != nil || !fi.Mode().IsRegular() {
+					in.Close()
+					continue
+				}
+				linked, src = in, in
+			}
+			f, err := root.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(h.Mode).Perm()|0o600)
+			if err != nil {
+				if linked != nil {
+					linked.Close()
+				}
+				continue
+			}
+			_, err = io.Copy(f, io.LimitReader(src, maxExtract))
+			if cerr := f.Close(); err == nil {
+				err = cerr
+			}
+			if linked != nil {
+				linked.Close()
+			}
+			if err != nil {
 				return touched, err
 			}
 			touched = true
@@ -282,27 +337,6 @@ func isAncestor(name string, dirs []string) bool {
 		}
 	}
 	return false
-}
-
-func writeFile(target string, r io.Reader, mode os.FileMode) error {
-	f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm()|0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(f, r); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
-}
-
-func copyFile(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	return writeFile(dst, in, mode)
 }
 
 // describeLayers pairs each layer with the history entry that created it and marks the base
@@ -359,9 +393,20 @@ func describeLayers(cfg *v1.ConfigFile, layers []v1.Layer, base []v1.Hash) ([]in
 }
 
 // cleanCreatedBy shortens the history's "/bin/sh -c #(nop) COPY …" to the instruction.
+// buildArgs is BuildKit's "|2 NPM_TOKEN=… FOO=… " prefix: the build arguments of a RUN step.
+var buildArgs = regexp.MustCompile(`^\|\d+(\s+\S+=\S*)*\s+`)
+
+// secretArg is an assignment whose name says it holds a secret (TOKEN=, API_KEY=, PASSWORD=…).
+var secretArg = regexp.MustCompile(`(?i)\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSW(?:OR)?D|PASS|PWD|KEY|CREDENTIALS?|AUTH)[A-Z0-9_]*)=("[^"]*"|'[^']*'|\S+)`)
+
+// cleanCreatedBy shortens a history entry to the Dockerfile step. Build arguments (often a
+// registry or npm token) are dropped and values of secret-looking assignments masked: this text
+// goes into the SBOM and off the machine.
 func cleanCreatedBy(s string) string {
 	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "/bin/sh -c #(nop) ")
+	s = buildArgs.ReplaceAllString(s, "")
+	s = secretArg.ReplaceAllString(s, "$1=***")
+	s = strings.TrimSpace(strings.TrimPrefix(s, "/bin/sh -c #(nop) "))
 	if strings.HasPrefix(s, "/bin/sh -c ") {
 		s = "RUN " + strings.TrimPrefix(s, "/bin/sh -c ")
 	}

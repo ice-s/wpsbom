@@ -5,6 +5,8 @@ package push
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,13 +99,32 @@ func (c *Client) Workloads(ctx context.Context, cluster string, ws []Workload) (
 	return res.Workloads, err
 }
 
+// checkURL refuses to send the token (and the inventory) in clear text: https only, except to
+// this machine.
+func checkURL(base string) error {
+	u, err := url.Parse(base)
+	if err != nil {
+		return fmt.Errorf("API URL %q: %w", base, err)
+	}
+	switch {
+	case u.Scheme == "https" && u.Host != "":
+		return nil
+	case u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1"):
+		return nil
+	}
+	return fmt.Errorf("API URL %q: only https:// is allowed (http:// for localhost)", base)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) (int, error) {
 	if c.Token == "" {
-		return 0, errors.New("no API token: pass --token or set WPSBOM_TOKEN")
+		return 0, errors.New("no API token: put it in /etc/wpsbom/token (mode 600), or use --api-token-file / WPSBOM_TOKEN")
 	}
 	base := strings.TrimRight(c.URL, "/")
 	if base == "" {
 		base = DefaultURL
+	}
+	if err := checkURL(base); err != nil {
+		return 0, err
 	}
 	req, err := http.NewRequestWithContext(ctx, method, base+path, bytes.NewReader(body))
 	if err != nil {
@@ -148,8 +169,12 @@ func ProjectName(repo string) string {
 	n := strings.TrimPrefix(repo, "index.docker.io/")
 	n = strings.TrimPrefix(n, "docker.io/")
 	n = strings.TrimPrefix(n, "library/")
+	n = strings.Trim(n, " ./-")
+	// Too long: cut, plus a hash of the whole name. Keeping only the end would let
+	// "evil.io/aaaa…ghcr.io/acme/shop" take the name (and project) of ghcr.io/acme/shop.
 	if len(n) > 80 {
-		n = n[len(n)-80:]
+		sum := sha256.Sum256([]byte(n))
+		n = strings.TrimRight(n[:63], " ./-") + "-" + hex.EncodeToString(sum[:])[:16]
 	}
-	return strings.Trim(n, " ./-")
+	return n
 }

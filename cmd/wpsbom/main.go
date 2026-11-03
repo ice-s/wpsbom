@@ -15,10 +15,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"github.com/ice-s/wpsbom/internal/upgrade"
+	"github.com/ice-s/wpsbom/pkg/collector/lang"
 	"github.com/ice-s/wpsbom/pkg/docker"
 	"github.com/ice-s/wpsbom/pkg/format"
 	"github.com/ice-s/wpsbom/pkg/image"
@@ -54,7 +56,7 @@ Flags:
 `
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "wpsbom:", err)
@@ -138,9 +140,12 @@ type opts struct {
 	// push
 	project string
 	token   string
-	url     string
-	failOn  string
-	json    bool
+	// apiTokenFile holds the Watchpost token (default /etc/wpsbom/token when it exists).
+	apiTokenFile string
+	tokenFlag    bool // --token given on the command line (visible in ps)
+	url          string
+	failOn       string
+	json         bool
 	// k8s
 	cluster    string
 	namespace  string
@@ -175,7 +180,8 @@ func newFlags(cmd string, o *opts) *flag.FlagSet {
 		f.BoolVar(&o.reproducible, "reproducible", false, "no serial number or timestamp: same system, same bytes")
 	}
 	if cmd == "push" || cmd == "k8s" {
-		f.StringVar(&o.token, "token", os.Getenv("WPSBOM_TOKEN"), "Watchpost API `TOKEN` (default $WPSBOM_TOKEN)")
+		f.StringVar(&o.token, "token", os.Getenv("WPSBOM_TOKEN"), "Watchpost API `TOKEN` (default $WPSBOM_TOKEN; prefer --api-token-file: arguments show in ps)")
+		f.StringVar(&o.apiTokenFile, "api-token-file", os.Getenv("WPSBOM_TOKEN_FILE"), "read the Watchpost API token from `FILE` (default /etc/wpsbom/token if it exists; $WPSBOM_TOKEN_FILE)")
 		f.StringVar(&o.url, "url", envOr("WPSBOM_URL", push.DefaultURL), "Watchpost API base `URL` (default $WPSBOM_URL)")
 		f.StringVar(&o.failOn, "fail-on", "", "exit with status 3 when an upload has `kev` or `critical` vulnerabilities (for CI)")
 	}
@@ -272,6 +278,7 @@ func collect(ctx context.Context, root string, o *opts) ([]sbom, error) {
 			fmt.Fprintf(os.Stderr, "wpsbom: "+format+"\n", a...)
 		}
 	}
+	lang.Warn = func(err error) { fmt.Fprintf(os.Stderr, "wpsbom: skipped %v\n", err) }
 	summary := func(inv *inventory.Inventory) string {
 		return fmt.Sprintf("%d packages, %d applications", len(inv.Packages), len(inv.Apps))
 	}
@@ -438,7 +445,7 @@ func scanCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 
 	if o.outDir != "" {
-		if err := os.MkdirAll(o.outDir, 0o755); err != nil {
+		if err := os.MkdirAll(o.outDir, 0o700); err != nil {
 			return err
 		}
 		for _, out := range outs {
@@ -491,7 +498,7 @@ func write(out output, stdout io.Writer, encode func(io.Writer) error) error {
 	if out.file == "" {
 		return encode(stdout)
 	}
-	f, err := os.Create(out.file)
+	f, err := createPrivate(out.file)
 	if err != nil {
 		return err
 	}
@@ -502,8 +509,62 @@ func write(out output, stdout io.Writer, encode func(io.Writer) error) error {
 	return f.Close()
 }
 
-func newClient(o *opts) *push.Client {
-	return &push.Client{URL: o.url, Token: o.token, UserAgent: "wpsbom/" + wpsbom.Version}
+// DefaultTokenFile is where the token is read from when none is given.
+const DefaultTokenFile = "/etc/wpsbom/token"
+
+// createPrivate creates (or truncates) an output file readable by its owner only: an SBOM says
+// exactly what to attack on the machine. A symlink at the path is not followed.
+func createPrivate(name string) (*os.File, error) {
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	// An existing file keeps its mode on O_TRUNC.
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func writePrivate(name string, b []byte) error {
+	f, err := createPrivate(name)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func newClient(o *opts) (*push.Client, error) {
+	if o.tokenFlag {
+		fmt.Fprintln(os.Stderr, "wpsbom: warning: --token is visible to every user in ps; use --api-token-file or "+DefaultTokenFile)
+	}
+	token := o.token
+	file := o.apiTokenFile
+	if token == "" && file == "" {
+		if _, err := os.Stat(DefaultTokenFile); err == nil {
+			file = DefaultTokenFile
+		}
+	}
+	if token == "" && file != "" {
+		fi, err := os.Stat(file)
+		if err != nil {
+			return nil, fmt.Errorf("API token file: %w", err)
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			fmt.Fprintf(os.Stderr, "wpsbom: warning: %s is readable by other users; chmod 600 it\n", file)
+		}
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("API token file: %w", err)
+		}
+		token = strings.TrimSpace(string(b))
+	}
+	return &push.Client{URL: o.url, Token: token, UserAgent: "wpsbom/" + wpsbom.Version}, nil
 }
 
 func checkFailOn(v string) error {
@@ -534,11 +595,15 @@ func pushCmd(ctx context.Context, args []string, stdout io.Writer) error {
 		return errors.New("--project NAME is required for a host scan")
 	}
 	if o.outDir != "" {
-		if err := os.MkdirAll(o.outDir, 0o755); err != nil {
+		if err := os.MkdirAll(o.outDir, 0o700); err != nil {
 			return err
 		}
 	}
-	c := newClient(&o)
+	f.Visit(func(fl *flag.Flag) { o.tokenFlag = o.tokenFlag || fl.Name == "token" })
+	c, err := newClient(&o)
+	if err != nil {
+		return err
+	}
 	var results []uploaded
 	var policy error
 	// Images first, so the host's containers point at SBOMs that exist.
@@ -595,7 +660,7 @@ func upload(ctx context.Context, c *push.Client, project string, s sbom, failOn,
 	file := ""
 	if outDir != "" {
 		file = filepath.Join(outDir, s.kind+"-"+unsafeFile.ReplaceAllString(project, "_")+".cdx.json")
-		if err := os.WriteFile(file, buf.Bytes(), 0o644); err != nil {
+		if err := writePrivate(file, buf.Bytes()); err != nil {
 			return nil, err
 		}
 	}
@@ -640,7 +705,11 @@ func k8sCmd(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	c := newClient(&o)
+	f.Visit(func(fl *flag.Flag) { o.tokenFlag = o.tokenFlag || fl.Name == "token" })
+	c, err := newClient(&o)
+	if err != nil {
+		return err
+	}
 	var results []uploaded
 	var policy error
 	if o.scanImages {

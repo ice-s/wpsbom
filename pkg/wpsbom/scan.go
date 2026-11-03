@@ -4,8 +4,6 @@ package wpsbom
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -29,7 +27,8 @@ type Options struct {
 	// Live means the root is the running system (scan of "/"): the kernel version and
 	// hostname are read too.
 	Live bool
-	// RevealHostname reports the hostname as is instead of a hash of it.
+	// RevealHostname reports the hostname. By default it is left out: a hash of a short name
+	// like "web01" is reversed by trying names, so it would hide nothing.
 	RevealHostname bool
 	// Paths are source directories (absolute inside the root) searched for applications and
 	// their lock files, installed Python packages, or Go binaries. Nothing outside them is searched.
@@ -93,12 +92,8 @@ func Scan(ctx context.Context, fsys fs.FS, opts Options) (*inventory.Inventory, 
 		if b, err := fs.ReadFile(fsys, "proc/sys/kernel/osrelease"); err == nil {
 			inv.Kernel = strings.TrimSpace(string(b))
 		}
-		if h, err := os.Hostname(); err == nil {
+		if h, err := os.Hostname(); err == nil && opts.RevealHostname {
 			inv.Hostname = h
-			if !opts.RevealHostname {
-				sum := sha256.Sum256([]byte(h))
-				inv.Hostname = "sha256:" + hex.EncodeToString(sum[:8])
-			}
 		}
 	}
 	return inv, nil

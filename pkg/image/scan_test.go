@@ -87,3 +87,16 @@ func TestWanted(t *testing.T) {
 		t.Error("executables: only in application directories and below the size limit")
 	}
 }
+
+func TestCleanCreatedByHidesSecrets(t *testing.T) {
+	for in, want := range map[string]string{
+		`|2 NPM_TOKEN=npm_abc123 VERSION=1.4 /bin/sh -c npm ci`:                         "RUN npm ci",
+		`/bin/sh -c curl -H "x" https://x/?a=1 && GITHUB_TOKEN=ghp_secret make install`: `RUN curl -H "x" https://x/?a=1 && GITHUB_TOKEN=*** make install`,
+		`/bin/sh -c #(nop)  ENV DB_PASSWORD=hunter2`:                                    "ENV DB_PASSWORD=***",
+		`/bin/sh -c #(nop)  ENV PATH=/usr/local/bin:/usr/bin`:                           "ENV PATH=/usr/local/bin:/usr/bin",
+	} {
+		if got := cleanCreatedBy(in); got != want {
+			t.Errorf("cleanCreatedBy(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

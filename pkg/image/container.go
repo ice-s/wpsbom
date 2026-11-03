@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 
 	"github.com/ice-s/wpsbom/pkg/collector/lang"
@@ -64,7 +64,8 @@ func ScanContainer(ctx context.Context, c *docker.Client, id string, opts Option
 	}
 	var paths []string
 	for _, d := range dirs {
-		if fi, err := os.Stat(filepath.Join(merged, filepath.FromSlash(d))); err == nil && fi.IsDir() {
+		// Through fsys: the container's own symlinks resolve inside it, never on the host.
+		if fi, err := fs.Stat(fsys, strings.TrimPrefix(d, "/")); err == nil && fi.IsDir() {
 			paths = append(paths, d)
 		}
 	}
@@ -78,33 +79,38 @@ func ScanContainer(ctx context.Context, c *docker.Client, id string, opts Option
 	inv.Apps, inv.Packages = dropUnder(inv.Apps, inv.Packages, mounts)
 
 	if len(mounts) > 0 {
-		host, err := rootfs.New("/")
-		if err != nil {
-			return nil, err
-		}
 		for _, m := range mounts {
-			src := m.Source
+			// The mount's source is read as its own root: a symlink the container puts in it
+			// ("composer.lock" → "/etc/shadow", a directory → "/") resolves inside it, not on the host.
+			mfs, err := rootfs.New(m.Source)
+			if err != nil {
+				continue // gone, or a single bind-mounted file
+			}
 			// A mount above an application directory: search only the application directories under it.
 			var sub []string
 			for _, d := range dirs {
 				if within(d, m.Destination) {
-					sub = append(sub, path.Join(src, strings.TrimPrefix(d, m.Destination)))
+					sub = append(sub, path.Clean("/"+strings.TrimPrefix(d, m.Destination)))
 				}
 			}
 			// A mount at or below an application directory: all of it.
 			if len(sub) == 0 {
-				sub = []string{src}
+				sub = []string{"/"}
 			}
 			for _, s := range sub {
-				if fi, err := os.Stat(s); err != nil || !fi.IsDir() {
+				rel := strings.TrimPrefix(s, "/")
+				if rel == "" {
+					rel = "."
+				}
+				if fi, err := fs.Stat(mfs, rel); err != nil || !fi.IsDir() {
 					continue
 				}
-				apps, pkgs, err := lang.Collect(host, []string{s})
+				apps, pkgs, err := lang.Collect(mfs, []string{s})
 				if err != nil {
 					return nil, fmt.Errorf("mount %s: %w", m.Destination, err)
 				}
 				// Paths as the container sees them.
-				move := func(p string) string { return m.Destination + strings.TrimPrefix(p, src) }
+				move := func(p string) string { return path.Join(m.Destination, p) }
 				for i := range apps {
 					apps[i].Dir, apps[i].Manifest = move(apps[i].Dir), move(apps[i].Manifest)
 				}

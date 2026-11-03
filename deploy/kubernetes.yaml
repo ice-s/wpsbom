@@ -19,7 +19,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list"]
+    verbs: ["list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -57,10 +57,12 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: wpsbom
-              image: ghcr.io/ice-s/wpsbom:latest
-              # Change the cluster name; drop --scan-images to only report workloads (images then
-              # need SBOMs from CI: wpsbom push --image …).
-              args: ["k8s", "--cluster", "k8s-prod", "--scan-images"]
+              # A fixed release, not :latest: what runs in the cluster changes only when you change it here.
+              image: ghcr.io/ice-s/wpsbom:v1.4.1
+              # Change the cluster name. Add "--scan-images" to also pull and scan every running image
+              # (anyone who can start a pod then chooses what this job pulls); without it, images get
+              # their SBOMs from CI: wpsbom push --image ….
+              args: ["k8s", "--cluster", "k8s-prod"]
               env:
                 - name: WPSBOM_TOKEN
                   valueFrom: { secretKeyRef: { name: wpsbom, key: token } }
@@ -72,7 +74,7 @@ spec:
                 limits: { memory: 1Gi }
               securityContext:
                 allowPrivilegeEscalation: false
-                readOnlyRootFilesystem: false
+                readOnlyRootFilesystem: true
                 capabilities: { drop: ["ALL"] }
               volumeMounts:
                 - { name: tmp, mountPath: /tmp }

@@ -58,6 +58,9 @@ var parsers = []parser{
 
 // Collect searches each directory (absolute paths inside the root, e.g. "/var/www/shop") for
 // applications. A directory that does not exist is an error: it was asked for explicitly.
+// Warn receives the files that could not be read or parsed; Collect skips them.
+var Warn = func(error) {}
+
 func Collect(fsys fs.FS, dirs []string) ([]inventory.App, []inventory.Package, error) {
 	var apps []inventory.App
 	var pkgs []inventory.Package
@@ -100,7 +103,11 @@ func Collect(fsys fs.FS, dirs []string) ([]inventory.App, []inventory.Package, e
 					}
 					r, err := p.parse(fsys, dir, file)
 					if err != nil {
-						return &fs.PathError{Op: "parse", Path: "/" + rel, Err: err}
+						// One broken (or hostile: a FIFO, a huge file) lock file must not stop the
+						// scan of everything else on the host; it is reported and skipped.
+						Warn(&fs.PathError{Op: "parse", Path: "/" + rel, Err: err})
+						seen[rel] = true
+						break
 					}
 					if r == nil {
 						continue
